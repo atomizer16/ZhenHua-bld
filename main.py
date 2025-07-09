@@ -7,11 +7,6 @@ import warnings
 import hashlib
 import base64
 import io
-import datetime
-import cv2
-from PIL import Image
-import shutil
-import pandas as pd
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -268,15 +263,11 @@ class VideoProcessingThread(QThread):
         self.first_frame_orig = None
         self.first_frame_ann  = None
 
-        self.frame_records = []   # 记录每帧所有螺栓的检测结果
-        self.loose_frames = []   # [(frame_image, bolt_id, frame_idx)]
-
     def run(self):
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             self.finished_signal.emit("")
             return
-
         fps   = cap.get(cv2.CAP_PROP_FPS)
         w     = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h     = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -305,7 +296,7 @@ class VideoProcessingThread(QThread):
             if frame_bgr is None:
                 continue
 
-            # --- ID二次映射逻辑（和原代码一致）---
+            # 二次ID映射
             for box in result.boxes:
                 raw_id = box.id
                 if raw_id is None:
@@ -318,47 +309,23 @@ class VideoProcessingThread(QThread):
                 if box.data.shape[1] >= 8:
                     box.data[0,7] = stable_id
                 box.__dict__["id"] = stable_id
-                # 记录检测对象 (首次出现时登记)
+                # 记录检测对象 (只记录首次出现的对象类别)
                 if stable_id not in self.detected_objects:
                     cid = int(box.cls[0]) if box.cls is not None else -1
                     cname = result.names.get(cid, str(cid))
                     self.detected_objects[stable_id] = cname
 
-            # --- 数据收集：每帧每个螺栓 ---
-            for box in result.boxes:
-                # 只收集有映射的
-                stable_id = getattr(box, "id", None)
-                if stable_id is None:
-                    continue
-                cid = int(box.cls[0]) if box.cls is not None else -1
-                cname = result.names.get(cid, str(cid))
-                conf = float(box.conf[0]) if box.conf is not None else 0.0
-
-                # 收集所有检测数据（frame, bolt_id, status, conf）
-                self.frame_records.append({
-                    "frame": idx_frame,
-                    "bolt_id": stable_id,
-                    "status": cname,
-                    "conf": conf
-                })
-
-                # 如果是"松动"螺栓，则收集关键帧（确保仅保存每个螺栓的首帧或全部帧，可按需改动）
-                if cname.lower() == "loose":  # 注意"loose"应与你模型类别一致
-                    ann_bgr = result.plot(img=frame_bgr.copy())
-                    self.loose_frames.append(
-                        (ann_bgr.copy(), stable_id, idx_frame)
-                    )
-
-            # --- 首帧保存用于报告 ---
+            # 保存首帧图像用于报告
             if idx_frame == 1:
                 self.first_frame_orig = frame_bgr.copy()
+
             ann_bgr = result.plot(img=frame_bgr.copy())
             if idx_frame == 1:
                 self.first_frame_ann = ann_bgr.copy()
 
             out_vid.write(ann_bgr)
 
-            # --- 实时UI显示 ---
+            # 将当前帧发送到UI显示
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
             hh, ww, cc = ann_rgb.shape
             qimg = QImage(ann_rgb.data, ww, hh, ww*3, QImage.Format_RGB888)
@@ -426,12 +393,6 @@ def pil_to_pixmap(pil_img):
     qimg = QImage(data, w, h, w*3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
-def make_scan_dir(save_root_dir, suffix):
-    now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder = f"scan_{now}_{suffix}"
-    scan_dir = os.path.join(save_root_dir, folder)
-    os.makedirs(scan_dir, exist_ok=True)
-    return scan_dir
 
 class FunctionPage(QWidget):
     """
@@ -679,25 +640,27 @@ class VideoInferencePage(FunctionPage):
             self.info.setText(f"视频处理完成: {os.path.basename(path)}")
             self.btn_open.setEnabled(True)
             QMessageBox.information(self, "完成", "视频推理完成！")
-
-            # ========= 1. 生成检测报告(HTML) =========
-            base_name, ext = os.path.splitext(path)
-            report_path = base_name + "_report.html"
+            # 自动生成报告
             try:
+                base_name, ext = os.path.splitext(path)
+                report_path = base_name + "_report.html"
                 html = []
                 html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
                 html.append("<h1>视频检测报告</h1>")
                 # 如果有首帧图像，加入报告
                 if self.thread and self.thread.first_frame_orig is not None:
+                    # 将首帧和标注首帧编码为图像
                     fmt = "JPEG"
-                    orig_rgb = ann_rgb = None
+                    orig_rgb = None
+                    ann_rgb = None
                     try:
                         orig_bgr = self.thread.first_frame_orig
                         ann_bgr = self.thread.first_frame_ann
                         orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB)
                         ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
                     except Exception as e:
-                        orig_rgb = ann_rgb = None
+                        orig_rgb = None
+                        ann_rgb = None
                     if orig_rgb is not None and ann_rgb is not None:
                         orig_buf = io.BytesIO()
                         Image.fromarray(orig_rgb).save(orig_buf, format=fmt)
@@ -715,6 +678,7 @@ class VideoInferencePage(FunctionPage):
                     html.append("<p>未检测到任何目标。</p>")
                 else:
                     html.append("<ul>")
+                    # 按照ID排序列出
                     for sid, cname in sorted(self.thread.detected_objects.items()):
                         html.append(f"<li>螺栓编号 {sid}: 状态 = {cname}</li>")
                     html.append("</ul>")
@@ -727,46 +691,6 @@ class VideoInferencePage(FunctionPage):
                 QMessageBox.information(self, "报告已生成", f"检测报告已保存:\n{report_path}")
             except Exception as e:
                 QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
-
-        # ========= 2. 自动批次归档 =========
-            scan_dir = make_scan_dir(self.main_window.save_root_dir, "v")
-
-        # 导出CSV（所有检测数据）
-            if hasattr(self.thread, "frame_records"):
-                csv_path = os.path.join(scan_dir, "bolt_detection_result.csv")
-                pd.DataFrame(self.thread.frame_records).to_csv(csv_path, index=False)
-
-        # 导出松动关键帧图片
-            loose_frames = getattr(self.thread, "loose_frames", [])
-            for img, bolt_id, frame_idx in loose_frames:
-                img_path = os.path.join(
-                    scan_dir, f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
-                )
-                cv2.imwrite(img_path, img)
-
-        # 复制视频
-            video_dst = os.path.join(scan_dir, "temp_output_video.mp4")
-            try:
-                shutil.copy(path, video_dst)
-            except Exception as e:
-                QMessageBox.warning(self, "拷贝视频失败", f"视频文件复制失败: {e}")
-
-        # 复制HTML检测报告
-            if os.path.exists(report_path):
-                try:
-                    shutil.copy(
-                        report_path,
-                        os.path.join(scan_dir, os.path.basename(report_path))
-                    )
-                except Exception as e:
-                    QMessageBox.warning(self, "拷贝报告失败", f"报告复制失败: {e}")
-
-            QMessageBox.information(
-                self,
-                "检测结果归档完成",
-                f"本次检测所有结果已保存到：\n{scan_dir}"
-            )
-
         else:
             self.info.setText("视频推理失败或中断。")
             QMessageBox.critical(self, "错误", "视频推理失败。")
@@ -899,17 +823,6 @@ class SettingsPage(FunctionPage):
         h2.addWidget(self.lb_val)
         vb.addLayout(h2)
 
-        # 添加保存目录选择
-        h3 = QHBoxLayout()
-        lb3 = QLabel("保存目录：")
-        self.ed_dir = QLineEdit(self.main_window.save_root_dir)
-        self.ed_dir.setReadOnly(True)
-        btn_sel_dir = QPushButton("选择...", clicked=self.select_save_dir)
-        h3.addWidget(lb3)
-        h3.addWidget(self.ed_dir)
-        h3.addWidget(btn_sel_dir)
-        vb.addLayout(h3)
-
         self.content_layout.addWidget(group)
 
         help_txt = (
@@ -938,12 +851,6 @@ class SettingsPage(FunctionPage):
 
     def on_back(self):
         self.main_window.gotoPage(1)
-
-    def select_save_dir(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "选择数据保存根目录")
-        if dir_path:
-            self.ed_dir.setText(dir_path)
-            self.main_window.save_root_dir = dir_path
 
 
 ###############################################################################
@@ -1255,7 +1162,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("岸桥轨道螺栓松动监测系统")
         self.resize(1200,800)
         self.current_user = current_user
-        self.save_root_dir = os.path.expanduser("~")
 
         # 资源路径由全局常量管理
         self.crane_image_path  = CRANE_IMAGE_PATH
