@@ -12,6 +12,7 @@ import cv2
 from PIL import Image
 import shutil
 import pandas as pd
+import paho.mqtt.client as mqtt
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -433,6 +434,29 @@ def make_scan_dir(save_root_dir, suffix):
     os.makedirs(scan_dir, exist_ok=True)
     return scan_dir
 
+def get_all_batches(save_root_dir):
+    """
+    扫描本地所有检测批次文件夹（scan_YYYYMMDD_HHMMSS_*），
+    返回 [{'path': 批次目录, 'type': p/v/c, 'time': 时间字符串, 'name': 文件夹名}, ...]，按时间降序排列。
+    """
+    batches = []
+    for name in os.listdir(save_root_dir):
+        if name.startswith("scan_") and os.path.isdir(os.path.join(save_root_dir, name)):
+            # 例如 scan_20240708_140102_v
+            parts = name.split("_")
+            if len(parts) >= 4:
+                batch_type = parts[-1]
+                batch_time = "_".join(parts[1:-1])
+                batches.append({
+                    "path": os.path.join(save_root_dir, name),
+                    "type": batch_type,
+                    "time": batch_time,
+                    "name": name
+                })
+    # 按时间逆序排列
+    batches.sort(key=lambda b: b["time"], reverse=True)
+    return batches
+
 class FunctionPage(QWidget):
     """
     带“返回上一页”按钮+标题的基类
@@ -767,6 +791,23 @@ class VideoInferencePage(FunctionPage):
                 f"本次检测所有结果已保存到：\n{scan_dir}"
             )
 
+            mw = self.main_window
+            if mw.upload_mode == "auto":
+                uploader = MqttUploader(
+                    host=mw.mqtt_host,
+                    port=mw.mqtt_port,
+                    username=mw.mqtt_user,
+                    password=mw.mqtt_pass,
+                    topic=mw.mqtt_topic
+                )
+            try:
+                uploader.connect()
+                uploader.upload_batch(scan_dir)
+                uploader.disconnect()
+                QMessageBox.information(self, "自动上传完成", f"批次数据已上传至云端服务器。")
+            except Exception as e:
+                QMessageBox.warning(self, "自动上传失败", f"上传失败：{e}")
+
         else:
             self.info.setText("视频推理失败或中断。")
             QMessageBox.critical(self, "错误", "视频推理失败。")
@@ -868,6 +909,9 @@ class SettingsPage(FunctionPage):
     def initUI(self):
         group = QGroupBox("模型与推理设置")
         vb = QVBoxLayout(group)
+
+        btn_upload = QPushButton("云端上传设置", clicked=lambda: self.main_window.gotoPage(7))
+        self.content_layout.addWidget(btn_upload)  # 或合适的布局位置
 
         # 模型权重路径
         h1 = QHBoxLayout()
@@ -1166,6 +1210,154 @@ class VibrationPage(QWidget):
         self.fig.tight_layout()
         self.canvas.draw()
 
+###############################################################################
+#   7) 上传模块
+###############################################################################
+class MqttUploader:
+    def __init__(self, host, port, username=None, password=None, topic="bolt/upload"):
+        self.host = host
+        self.port = int(port)
+        self.username = username
+        self.password = password
+        self.topic = topic
+        self.client = None
+
+    def connect(self):
+        self.client = mqtt.Client()
+        if self.username:
+            self.client.username_pw_set(self.username, self.password)
+        self.client.connect(self.host, self.port, 60)
+        self.client.loop_start()
+
+    def disconnect(self):
+        if self.client:
+            self.client.loop_stop()
+            self.client.disconnect()
+            self.client = None
+
+    def upload_file(self, filepath):
+        with open(filepath, "rb") as f:
+            data = f.read()
+        filename = os.path.basename(filepath)
+        payload = filename.encode() + b"||" + data
+        self.client.publish(self.topic, payload, qos=1)
+        print(f"已上传文件：{filename} 到Topic: {self.topic}")
+
+    def upload_batch(self, batch_dir):
+        for name in os.listdir(batch_dir):
+            fp = os.path.join(batch_dir, name)
+            if os.path.isfile(fp):
+                self.upload_file(fp)
+
+class UploadSettingsPage(FunctionPage):
+    def __init__(self, mw, parent=None):
+        super().__init__(mw, "云端上传设置", parent)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        # MQTT参数输入区
+        self.ed_host = QLineEdit()
+        self.ed_host.setPlaceholderText("MQTT服务器地址")
+        self.ed_port = QLineEdit()
+        self.ed_port.setPlaceholderText("端口号(默认1883)")
+        self.ed_user = QLineEdit()
+        self.ed_user.setPlaceholderText("用户名(可选)")
+        self.ed_pass = QLineEdit()
+        self.ed_pass.setPlaceholderText("密码(可选)")
+        self.ed_pass.setEchoMode(QLineEdit.Password)
+        self.ed_topic = QLineEdit()
+        self.ed_topic.setPlaceholderText("上传主题(Topic)")
+        self.ed_topic.setText("bolt/upload")
+
+        layout.addWidget(QLabel("服务器地址:"))
+        layout.addWidget(self.ed_host)
+        layout.addWidget(QLabel("端口号:"))
+        layout.addWidget(self.ed_port)
+        layout.addWidget(QLabel("用户名:"))
+        layout.addWidget(self.ed_user)
+        layout.addWidget(QLabel("密码:"))
+        layout.addWidget(self.ed_pass)
+        layout.addWidget(QLabel("主题(Topic):"))
+        layout.addWidget(self.ed_topic)
+
+        # 上传模式切换
+        self.btn_mode = QPushButton("当前为手动上传，点击切换为自动上传", clicked=self.toggle_mode)
+        layout.addWidget(self.btn_mode)
+
+        # 立即上传按钮（仅手动模式可用）
+        self.btn_upload = QPushButton("立即上传最新批次", clicked=self.upload_latest_batch)
+        layout.addWidget(self.btn_upload)
+
+        self.content_layout.addLayout(layout)
+
+        # 让UI与全局参数保持同步
+        self.sync_from_global()
+
+    def sync_from_global(self):
+        mw = self.main_window
+        self.ed_host.setText(mw.mqtt_host)
+        self.ed_port.setText(str(mw.mqtt_port))
+        self.ed_user.setText(mw.mqtt_user)
+        self.ed_pass.setText(mw.mqtt_pass)
+        self.ed_topic.setText(mw.mqtt_topic)
+        self.update_btn_mode()
+
+    def sync_to_global(self):
+        mw = self.main_window
+        mw.mqtt_host = self.ed_host.text().strip()
+        mw.mqtt_port = int(self.ed_port.text().strip() or 1883)
+        mw.mqtt_user = self.ed_user.text().strip()
+        mw.mqtt_pass = self.ed_pass.text().strip()
+        mw.mqtt_topic = self.ed_topic.text().strip()
+        mw.upload_mode = "auto" if self.btn_mode.text().startswith("当前为自动上传") else "manual"
+
+    def update_btn_mode(self):
+        mw = self.main_window
+        if mw.upload_mode == "manual":
+            self.btn_mode.setText("当前为手动上传，点击切换为自动上传")
+            self.btn_upload.setEnabled(True)
+        else:
+            self.btn_mode.setText("当前为自动上传，点击切换为手动上传")
+            self.btn_upload.setEnabled(False)
+
+    def toggle_mode(self):
+        mw = self.main_window
+        if mw.upload_mode == "manual":
+            mw.upload_mode = "auto"
+        else:
+            mw.upload_mode = "manual"
+        self.update_btn_mode()
+
+    def upload_latest_batch(self):
+        # 保存当前参数到全局
+        self.sync_to_global()
+
+        # 找到最新批次
+        root = self.main_window.save_root_dir
+        batches = get_all_batches(root)
+        if batches:
+            latest = batches[0]['path']
+            uploader = MqttUploader(
+                host=self.main_window.mqtt_host,
+                port=self.main_window.mqtt_port,
+                username=self.main_window.mqtt_user,
+                password=self.main_window.mqtt_pass,
+                topic=self.main_window.mqtt_topic
+            )
+            try:
+                uploader.connect()
+                uploader.upload_batch(latest)
+                uploader.disconnect()
+                QMessageBox.information(self, "上传完成", f"已上传：{latest}")
+            except Exception as e:
+                QMessageBox.warning(self, "上传失败", f"上传失败：{e}")
+        else:
+            QMessageBox.warning(self, "无批次", "未发现可上传的检测批次。")
+
+    def on_back(self):
+        self.main_window.gotoPage(5)
 
 ###############################################################################
 #   总首页 & 主窗口
@@ -1248,7 +1440,6 @@ class MainHomePage(QWidget):
         else:
             self.bg_label.setText("未找到 crane.jpg")
 
-
 class MainWindow(QMainWindow):
     def __init__(self, current_user=None):
         super().__init__()
@@ -1256,6 +1447,13 @@ class MainWindow(QMainWindow):
         self.resize(1200,800)
         self.current_user = current_user
         self.save_root_dir = os.path.expanduser("~")
+
+        self.mqtt_host = ""
+        self.mqtt_port = 1883
+        self.mqtt_user = ""
+        self.mqtt_pass = ""
+        self.mqtt_topic = "bolt/upload"
+        self.upload_mode = "manual"  # "manual" or "auto"
 
         # 资源路径由全局常量管理
         self.crane_image_path  = CRANE_IMAGE_PATH
@@ -1265,7 +1463,7 @@ class MainWindow(QMainWindow):
         self.model             = None
 
         self.init_model()
-        self.initUI()
+        self.initUI() 
 
     def init_model(self):
         try:
@@ -1301,16 +1499,18 @@ class MainWindow(QMainWindow):
         self.page_camera  = CameraPage(self, self.model, self.conf_thres, self.device_option)           # 4
         self.page_setting = SettingsPage(self)                                                           # 5
         self.page_vib     = VibrationPage(self)                                                         # 6
-
+        self.page_upload = UploadSettingsPage(self)
+               
         for p in [
             self.page_main, self.page_vision, self.page_image,
             self.page_video, self.page_camera, self.page_setting,
-            self.page_vib
+            self.page_vib, self.page_upload, 
         ]:
             self.stacked.addWidget(p)
-
+        
         self.setCentralWidget(self.stacked)
-
+        self.stacked.setCurrentIndex(0)
+        
     def gotoPage(self, idx):
         self.stacked.setCurrentIndex(idx)
 
