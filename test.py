@@ -13,6 +13,7 @@ from PIL import Image
 import shutil
 import pandas as pd
 import paho.mqtt.client as mqtt
+from webdav3.client import Client
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -910,8 +911,10 @@ class SettingsPage(FunctionPage):
         group = QGroupBox("模型与推理设置")
         vb = QVBoxLayout(group)
 
-        btn_upload = QPushButton("云端上传设置", clicked=lambda: self.main_window.gotoPage(7))
+        btn_upload = QPushButton("MQTT云端上传设置", clicked=lambda: self.main_window.gotoPage(7))
         self.content_layout.addWidget(btn_upload)  # 或合适的布局位置
+        btn_webdav_upload = QPushButton("WebDAV云端上传设置", clicked=lambda: self.main_window.gotoPage(8))
+        self.content_layout.addWidget(btn_webdav_upload)
 
         # 模型权重路径
         h1 = QHBoxLayout()
@@ -1359,6 +1362,129 @@ class UploadSettingsPage(FunctionPage):
     def on_back(self):
         self.main_window.gotoPage(5)
 
+class WebDAVUploader:
+    def __init__(self, host, username=None, password=None, remote_path="/bolt_upload/"):
+        # host如 https://your.webdav.server:port/
+        options = {
+            'webdav_hostname': host,
+            'webdav_login': username or '',
+            'webdav_password': password or ''
+        }
+        self.client = Client(options)
+        self.remote_path = remote_path if remote_path.endswith('/') else remote_path + '/'
+
+    def upload_file(self, local_filepath):
+        filename = os.path.basename(local_filepath)
+        remote_fp = self.remote_path + filename
+        self.client.upload_sync(remote_path=remote_fp, local_path=local_filepath)
+        print(f"WebDAV已上传: {filename} 到 {remote_fp}")
+
+    def upload_batch(self, batch_dir):
+        # 批次目录下所有文件全部上传
+        for name in os.listdir(batch_dir):
+            fp = os.path.join(batch_dir, name)
+            if os.path.isfile(fp):
+                self.upload_file(fp)
+
+class WebDAVUploadSettingsPage(FunctionPage):
+    def __init__(self, mw, parent=None):
+        super().__init__(mw, "WebDAV云端上传设置", parent)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+
+        # WebDAV参数输入区
+        self.ed_host = QLineEdit()
+        self.ed_host.setPlaceholderText("WebDAV服务器地址（含http/https）")
+        self.ed_user = QLineEdit()
+        self.ed_user.setPlaceholderText("用户名(可选)")
+        self.ed_pass = QLineEdit()
+        self.ed_pass.setPlaceholderText("密码(可选)")
+        self.ed_pass.setEchoMode(QLineEdit.Password)
+        self.ed_remotepath = QLineEdit()
+        self.ed_remotepath.setPlaceholderText("远程文件夹(如/bolt_upload/)")
+        self.ed_remotepath.setText("/bolt_upload/")
+
+        layout.addWidget(QLabel("WebDAV服务器地址:"))
+        layout.addWidget(self.ed_host)
+        layout.addWidget(QLabel("用户名:"))
+        layout.addWidget(self.ed_user)
+        layout.addWidget(QLabel("密码:"))
+        layout.addWidget(self.ed_pass)
+        layout.addWidget(QLabel("远程文件夹路径:"))
+        layout.addWidget(self.ed_remotepath)
+
+        # 上传模式切换
+        self.btn_mode = QPushButton("当前为手动上传，点击切换为自动上传", clicked=self.toggle_mode)
+        layout.addWidget(self.btn_mode)
+
+        # 立即上传按钮（仅手动模式可用）
+        self.btn_upload = QPushButton("立即上传最新批次", clicked=self.upload_latest_batch)
+        layout.addWidget(self.btn_upload)
+
+        self.content_layout.addLayout(layout)
+        self.sync_from_global()
+
+    def sync_from_global(self):
+        mw = self.main_window
+        self.ed_host.setText(mw.webdav_host)
+        self.ed_user.setText(mw.webdav_user)
+        self.ed_pass.setText(mw.webdav_pass)
+        self.ed_remotepath.setText(mw.webdav_remote_path)
+        self.update_btn_mode()
+
+    def sync_to_global(self):
+        mw = self.main_window
+        mw.webdav_host = self.ed_host.text().strip()
+        mw.webdav_user = self.ed_user.text().strip()
+        mw.webdav_pass = self.ed_pass.text().strip()
+        mw.webdav_remote_path = self.ed_remotepath.text().strip()
+        mw.webdav_upload_mode = "auto" if self.btn_mode.text().startswith("当前为自动上传") else "manual"
+
+    def update_btn_mode(self):
+        mw = self.main_window
+        if mw.webdav_upload_mode == "manual":
+            self.btn_mode.setText("当前为手动上传，点击切换为自动上传")
+            self.btn_upload.setEnabled(True)
+        else:
+            self.btn_mode.setText("当前为自动上传，点击切换为手动上传")
+            self.btn_upload.setEnabled(False)
+
+    def toggle_mode(self):
+        mw = self.main_window
+        if mw.webdav_upload_mode == "manual":
+            mw.webdav_upload_mode = "auto"
+        else:
+            mw.webdav_upload_mode = "manual"
+        self.update_btn_mode()
+
+    def upload_latest_batch(self):
+        # 保存当前参数到全局
+        self.sync_to_global()
+
+        # 找到最新批次
+        root = self.main_window.save_root_dir
+        batches = get_all_batches(root)
+        if batches:
+            latest = batches[0]['path']
+            uploader = WebDAVUploader(
+                host=self.main_window.webdav_host,
+                username=self.main_window.webdav_user,
+                password=self.main_window.webdav_pass,
+                remote_path=self.main_window.webdav_remote_path
+            )
+            try:
+                uploader.upload_batch(latest)
+                QMessageBox.information(self, "上传完成", f"已上传：{latest}")
+            except Exception as e:
+                QMessageBox.warning(self, "上传失败", f"上传失败：{e}")
+        else:
+            QMessageBox.warning(self, "无批次", "未发现可上传的检测批次。")
+
+    def on_back(self):
+        self.main_window.gotoPage(5)  # 返回设置页或你想返回的页面
+
 ###############################################################################
 #   总首页 & 主窗口
 ###############################################################################
@@ -1455,6 +1581,12 @@ class MainWindow(QMainWindow):
         self.mqtt_topic = "bolt/upload"
         self.upload_mode = "manual"  # "manual" or "auto"
 
+        self.webdav_host = ""
+        self.webdav_user = ""
+        self.webdav_pass = ""
+        self.webdav_remote_path = "/bolt_upload/"
+        self.webdav_upload_mode = "manual"  # "manual" or "auto"
+
         # 资源路径由全局常量管理
         self.crane_image_path  = CRANE_IMAGE_PATH
         self.model_weight_path = WEIGHTS_PATH
@@ -1463,7 +1595,7 @@ class MainWindow(QMainWindow):
         self.model             = None
 
         self.init_model()
-        self.initUI() 
+        self.initUI()
 
     def init_model(self):
         try:
@@ -1499,12 +1631,13 @@ class MainWindow(QMainWindow):
         self.page_camera  = CameraPage(self, self.model, self.conf_thres, self.device_option)           # 4
         self.page_setting = SettingsPage(self)                                                           # 5
         self.page_vib     = VibrationPage(self)                                                         # 6
-        self.page_upload = UploadSettingsPage(self)
+        self.page_upload = UploadSettingsPage(self)                                                     #7
+        self.page_webdav_upload = WebDAVUploadSettingsPage(self)                                         #8
                
         for p in [
             self.page_main, self.page_vision, self.page_image,
             self.page_video, self.page_camera, self.page_setting,
-            self.page_vib, self.page_upload, 
+            self.page_vib, self.page_upload, self.page_webdav_upload
         ]:
             self.stacked.addWidget(p)
         
