@@ -793,21 +793,36 @@ class VideoInferencePage(FunctionPage):
             )
 
             mw = self.main_window
+        # MQTT 自动上传
             if mw.upload_mode == "auto":
-                uploader = MqttUploader(
-                    host=mw.mqtt_host,
-                    port=mw.mqtt_port,
-                    username=mw.mqtt_user,
-                    password=mw.mqtt_pass,
-                    topic=mw.mqtt_topic
-                )
-            try:
-                uploader.connect()
-                uploader.upload_batch(scan_dir)
-                uploader.disconnect()
-                QMessageBox.information(self, "自动上传完成", f"批次数据已上传至云端服务器。")
-            except Exception as e:
-                QMessageBox.warning(self, "自动上传失败", f"上传失败：{e}")
+                try:
+                    mqtt_uploader = MqttUploader(
+                        host=mw.mqtt_host,
+                        port=mw.mqtt_port,
+                        username=mw.mqtt_user,
+                        password=mw.mqtt_pass,
+                        topic=mw.mqtt_topic
+                    )
+                    mqtt_uploader.connect()
+                    mqtt_uploader.upload_batch(scan_dir)
+                    mqtt_uploader.disconnect()
+                    QMessageBox.information(self, "自动上传完成 (MQTT)", "批次数据已上传至云端服务器（MQTT）。")
+                except Exception as e:
+                    QMessageBox.warning(self, "自动上传失败 (MQTT)", f"上传失败：{e}")
+
+        # WebDAV 自动上传
+            if getattr(mw, "webdav_upload_mode", "manual") == "auto":
+                try:
+                    webdav_uploader = WebDAVUploader(
+                        host=mw.webdav_host,
+                        username=mw.webdav_user,
+                        password=mw.webdav_pass,
+                        remote_path=mw.webdav_remote_path
+                    )
+                    webdav_uploader.upload_batch(scan_dir)
+                    QMessageBox.information(self, "自动上传完成 (WebDAV)", "批次数据已上传至云端服务器（WebDAV）。")
+                except Exception as e:
+                    QMessageBox.warning(self, "自动上传失败 (WebDAV)", f"上传失败：{e}")
 
         else:
             self.info.setText("视频推理失败或中断。")
