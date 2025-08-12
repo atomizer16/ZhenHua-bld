@@ -793,36 +793,52 @@ class VideoInferencePage(FunctionPage):
             )
 
             mw = self.main_window
-        # MQTT 自动上传
-            if mw.upload_mode == "auto":
+            upload_msgs = []
+
+            # ---- MQTT 自动上传 ----
+            # 条件：开启自动上传且配置了服务器地址
+            if getattr(mw, 'upload_mode', 'manual') == 'auto' and getattr(mw, 'mqtt_host', ''):
+                uploader = None
                 try:
-                    mqtt_uploader = MqttUploader(
+                    uploader = MqttUploader(
                         host=mw.mqtt_host,
                         port=mw.mqtt_port,
                         username=mw.mqtt_user,
                         password=mw.mqtt_pass,
                         topic=mw.mqtt_topic
                     )
-                    mqtt_uploader.connect()
-                    mqtt_uploader.upload_batch(scan_dir)
-                    mqtt_uploader.disconnect()
-                    QMessageBox.information(self, "自动上传完成 (MQTT)", "批次数据已上传至云端服务器（MQTT）。")
+                    uploader.connect()
+                    uploader.upload_batch(scan_dir)
+                    upload_msgs.append("MQTT 上传成功")
                 except Exception as e:
-                    QMessageBox.warning(self, "自动上传失败 (MQTT)", f"上传失败：{e}")
+                    upload_msgs.append(f"MQTT 上传失败：{e}")
+                finally:
+                    try:
+                        if uploader:
+                            uploader.disconnect()
+                    except Exception:
+                        pass
+            else:
+                upload_msgs.append("MQTT 未启用自动上传或未配置服务器地址")
 
-        # WebDAV 自动上传
-            if getattr(mw, "webdav_upload_mode", "manual") == "auto":
+# ---- WebDAV 自动上传 ----
+# 条件：开启自动上传且配置了服务器地址
+            if getattr(mw, 'webdav_upload_mode', 'manual') == 'auto' and getattr(mw, 'webdav_host', ''):
                 try:
-                    webdav_uploader = WebDAVUploader(
+                    dav = WebDAVUploader(
                         host=mw.webdav_host,
                         username=mw.webdav_user,
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path
                     )
-                    webdav_uploader.upload_batch(scan_dir)
-                    QMessageBox.information(self, "自动上传完成 (WebDAV)", "批次数据已上传至云端服务器（WebDAV）。")
+                    dav.upload_batch(scan_dir)
+                    upload_msgs.append("WebDAV 上传成功")
                 except Exception as e:
-                    QMessageBox.warning(self, "自动上传失败 (WebDAV)", f"上传失败：{e}")
+                    upload_msgs.append(f"WebDAV 上传失败：{e}")
+            else:
+                upload_msgs.append("WebDAV 未启用自动上传或未配置服务器地址")
+
+            QMessageBox.information(self, "上传状态", "\n".join(upload_msgs))
 
         else:
             self.info.setText("视频推理失败或中断。")
