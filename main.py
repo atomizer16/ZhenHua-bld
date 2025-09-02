@@ -504,14 +504,12 @@ class ImageInferencePage(FunctionPage):
 
     def initUI(self):
         btn_sel = QPushButton("选择图片文件", clicked=self.select_image)
-        btn_sel.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
-        )
         btn_sel.setFixedWidth(200)
         self.content_layout.addWidget(btn_sel, alignment=Qt.AlignCenter)
+
+        btn_dir = QPushButton("选择图片文件夹", clicked=self.select_folder)
+        btn_dir.setFixedWidth(200)
+        self.content_layout.addWidget(btn_dir, alignment=Qt.AlignCenter)
 
         self.label_orig = QLabel()
         self.label_orig.setFixedSize(600, 400)
@@ -534,94 +532,180 @@ class ImageInferencePage(FunctionPage):
 
     def select_image(self):
         fp, _ = QFileDialog.getOpenFileName(
-            self, "选择图片", "", "Images (*.jpg *.jpeg *.png)"
+            self, "选择图片", "", "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
         )
         if not fp:
             return
+        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            pil_img = Image.open(fp).convert("RGB")
-            w0, h0 = pil_img.size
-            # 将原始图像显示
-            r = min(600 / w0, 400 / h0, 1.0)
-            w1, h1 = int(w0 * r), int(h0 * r)
-            pil_resize = pil_img.resize((w1, h1), Image.Resampling.LANCZOS)
-            self.label_orig.setPixmap(pil_to_pixmap(pil_resize))
-
-            # 模型推理
-            bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            res = self.model.predict(
-                source=bgr,
-                conf=self.conf_thres,
-                device=self.device_option,
-                imgsz=640
-            )[0]
-            ann_bgr = res.plot(img=bgr.copy())
-
-            # 显示结果图像
-            ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
-            ann_pil = Image.fromarray(ann_rgb).resize((w1, h1), Image.Resampling.LANCZOS)
-            self.label_res.setPixmap(pil_to_pixmap(ann_pil))
-
-            # 显示检测详情
-            boxes = res.boxes
-            if len(boxes) == 0:
-                self.text_detail.setPlainText("未检测到任何目标")
-            else:
-                info_lines = []
-                for i, box in enumerate(boxes):
-                    cid   = int(box.cls[0])
-                    cnam  = res.names.get(cid, str(cid))
-                    cconf = float(box.conf[0]) if box.conf is not None else 0.0
-                    coords= [round(x,2) for x in box.xyxy[0].tolist()]
-                    info_lines.append(
-                        f"目标{i+1}: 类别={cnam}, 置信度={cconf:.3f}, 坐标={coords}"
+            self.run_inference(fp, scan_dir)
+            QMessageBox.information(
+                self, "检测结果归档完成", f"本次检测所有结果已保存到：\n{scan_dir}"
+            )
+            mw = self.main_window
+            if getattr(mw, "webdav_upload_mode", "manual") == "auto" and getattr(
+                mw, "webdav_host", ""
+            ):
+                try:
+                    dav = WebDAVUploader(
+                        host=mw.webdav_host,
+                        username=mw.webdav_user,
+                        password=mw.webdav_pass,
+                        remote_path=mw.webdav_remote_path,
                     )
-                self.text_detail.setPlainText("\n".join(info_lines))
-            # 自动生成检测报告 (HTML 文件)
-            try:
-                base_name, ext = os.path.splitext(fp)
-                report_path = base_name + "_report.html"
-                # 准备嵌入报告的图像数据（使用 base64 编码）
-                # 原始图像
-                fmt = "PNG"
-                if ext.lower() in [".jpg", ".jpeg"]:
-                    fmt = "JPEG"
-                orig_buf = io.BytesIO()
-                pil_img.save(orig_buf, format=fmt)
-                orig_b64 = base64.b64encode(orig_buf.getvalue()).decode('utf-8')
-                orig_data_uri = f"data:image/{fmt.lower()};base64,{orig_b64}"
-                # 标注后图像
-                ann_buf = io.BytesIO()
-                # 用相同格式保存标注结果
-                Image.fromarray(ann_rgb).save(ann_buf, format=fmt)
-                ann_b64 = base64.b64encode(ann_buf.getvalue()).decode('utf-8')
-                ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
-                # 组装HTML内容
-                html = []
-                html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
-                html.append("<h1>图片检测报告</h1>")
-                html.append(f"<p><b>原始图像：</b><br><img src='{orig_data_uri}' width='600'></p>")
-                html.append(f"<p><b>标注结果图像：</b><br><img src='{ann_data_uri}' width='600'></p>")
-                html.append("<h2>检测结果</h2>")
-                if len(boxes) == 0:
-                    html.append("<p>未检测到任何目标。</p>")
-                else:
-                    html.append("<ul>")
-                    for i, box in enumerate(boxes):
-                        cid = int(box.cls[0])
-                        cname = res.names.get(cid, str(cid))
-                        # 将目标编号作为螺栓ID
-                        bolt_id = i + 1
-                        html.append(f"<li>螺栓编号 {bolt_id}: 状态 = {cname}</li>")
-                    html.append("</ul>")
-                html.append("</body></html>")
-                with open(report_path, 'w', encoding='utf-8') as f:
-                    f.write("\n".join(html))
-                QMessageBox.information(self, "报告已生成", f"检测报告已保存:\n{report_path}")
-            except Exception as e:
-                QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
+                    dav.upload_batch(scan_dir)
+                    QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
+                except Exception as e:
+                    QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"发生错误: {e}")
+
+    def select_folder(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "选择图片文件夹", "")
+        if not dir_path:
+            return
+        exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+        files = [
+            os.path.join(dir_path, f)
+            for f in os.listdir(dir_path)
+            if os.path.splitext(f)[1].lower() in exts
+        ]
+        if not files:
+            QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
+            return
+        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        for fp in files:
+            try:
+                self.run_inference(fp, scan_dir)
+                QApplication.processEvents()
+            except Exception as e:
+                QMessageBox.warning(self, "处理失败", f"文件 {fp} 处理失败: {e}")
+        QMessageBox.information(
+            self,
+            "检测完成",
+            f"已处理 {len(files)} 张图片，结果保存在：\n{scan_dir}",
+        )
+        mw = self.main_window
+        if getattr(mw, "webdav_upload_mode", "manual") == "auto" and getattr(
+            mw, "webdav_host", ""
+        ):
+            try:
+                dav = WebDAVUploader(
+                    host=mw.webdav_host,
+                    username=mw.webdav_user,
+                    password=mw.webdav_pass,
+                    remote_path=mw.webdav_remote_path,
+                )
+                dav.upload_batch(scan_dir)
+                QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
+            except Exception as e:
+                QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
+
+    def run_inference(self, fp, scan_dir):
+        pil_img = Image.open(fp).convert("RGB")
+        w0, h0 = pil_img.size
+        r = min(600 / w0, 400 / h0, 1.0)
+        w1, h1 = int(w0 * r), int(h0 * r)
+        pil_resize = pil_img.resize((w1, h1), Image.Resampling.LANCZOS)
+        self.label_orig.setPixmap(pil_to_pixmap(pil_resize))
+
+        bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+        res = self.model.predict(
+            source=bgr, conf=self.conf_thres, device=self.device_option, imgsz=640
+        )[0]
+        ann_bgr = res.plot(img=bgr.copy())
+
+        ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
+        ann_pil = Image.fromarray(ann_rgb).resize((w1, h1), Image.Resampling.LANCZOS)
+        self.label_res.setPixmap(pil_to_pixmap(ann_pil))
+
+        boxes = res.boxes
+        if len(boxes) == 0:
+            self.text_detail.setPlainText("未检测到任何目标")
+        else:
+            info_lines = []
+            for i, box in enumerate(boxes):
+                cid = int(box.cls[0])
+                cnam = res.names.get(cid, str(cid))
+                cconf = float(box.conf[0]) if box.conf is not None else 0.0
+                coords = [round(x, 2) for x in box.xyxy[0].tolist()]
+                info_lines.append(
+                    f"目标{i+1}: 类别={cnam}, 置信度={cconf:.3f}, 坐标={coords}"
+                )
+            self.text_detail.setPlainText("\n".join(info_lines))
+
+        base = os.path.splitext(os.path.basename(fp))[0]
+        ext = os.path.splitext(fp)[1]
+
+        try:
+            shutil.copy(fp, os.path.join(scan_dir, os.path.basename(fp)))
+        except Exception as e:
+            QMessageBox.warning(self, "拷贝图片失败", f"原始图片保存失败: {e}")
+
+        try:
+            ann_name = f"{base}_annotated{ext}"
+            ann_path = os.path.join(scan_dir, ann_name)
+            Image.fromarray(ann_rgb).save(ann_path)
+        except Exception as e:
+            QMessageBox.warning(self, "拷贝标注失败", f"标注图片保存失败: {e}")
+
+        try:
+            fmt = "PNG"
+            if ext.lower() in [".jpg", ".jpeg"]:
+                fmt = "JPEG"
+            orig_buf = io.BytesIO()
+            pil_img.save(orig_buf, format=fmt)
+            orig_b64 = base64.b64encode(orig_buf.getvalue()).decode("utf-8")
+            orig_data_uri = f"data:image/{fmt.lower()};base64,{orig_b64}"
+            ann_buf = io.BytesIO()
+            Image.fromarray(ann_rgb).save(ann_buf, format=fmt)
+            ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
+            ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
+            html = []
+            html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
+            html.append("<h1>图片检测报告</h1>")
+            html.append(f"<p><b>原始图像：</b><br><img src='{orig_data_uri}' width='600'></p>")
+            html.append(f"<p><b>标注结果图像：</b><br><img src='{ann_data_uri}' width='600'></p>")
+            html.append("<h2>检测结果</h2>")
+            if len(boxes) == 0:
+                html.append("<p>未检测到任何目标。</p>")
+            else:
+                html.append("<ul>")
+                for i, box in enumerate(boxes):
+                    cid = int(box.cls[0])
+                    cname = res.names.get(cid, str(cid))
+                    bolt_id = i + 1
+                    html.append(f"<li>螺栓编号 {bolt_id}: 状态 = {cname}</li>")
+                html.append("</ul>")
+            html.append("</body></html>")
+            report_path = os.path.join(scan_dir, f"{base}_report.html")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(html))
+        except Exception as e:
+            QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
+
+        try:
+            rows = []
+            for i, box in enumerate(boxes):
+                cid = int(box.cls[0])
+                cname = res.names.get(cid, str(cid))
+                cconf = float(box.conf[0]) if box.conf is not None else 0.0
+                x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
+                rows.append(
+                    {
+                        "bolt_id": i + 1,
+                        "class": cname,
+                        "confidence": cconf,
+                        "x1": x1,
+                        "y1": y1,
+                        "x2": x2,
+                        "y2": y2,
+                    }
+                )
+            csv_path = os.path.join(scan_dir, f"{base}_bolt_detection_result.csv")
+            pd.DataFrame(rows).to_csv(csv_path, index=False)
+        except Exception as e:
+            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
 
     def on_back(self):
         self.main_window.gotoPage(1)
