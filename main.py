@@ -574,12 +574,21 @@ class ImageInferencePage(FunctionPage):
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        all_rows = []
         for fp in files:
             try:
-                self.run_inference(fp, scan_dir)
+                rows = self.run_inference(fp, scan_dir)
+                all_rows.extend(rows)
                 QApplication.processEvents()
             except Exception as e:
                 QMessageBox.warning(self, "处理失败", f"文件 {fp} 处理失败: {e}")
+        try:
+            cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+            pd.DataFrame(all_rows, columns=cols).to_csv(
+                os.path.join(scan_dir, "bolt_detection_result.csv"), index=False
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
         QMessageBox.information(
             self,
             "检测完成",
@@ -638,11 +647,6 @@ class ImageInferencePage(FunctionPage):
         ext = os.path.splitext(fp)[1]
 
         try:
-            shutil.copy(fp, os.path.join(scan_dir, os.path.basename(fp)))
-        except Exception as e:
-            QMessageBox.warning(self, "拷贝图片失败", f"原始图片保存失败: {e}")
-
-        try:
             ann_name = f"{base}_annotated{ext}"
             ann_path = os.path.join(scan_dir, ann_name)
             Image.fromarray(ann_rgb).save(ann_path)
@@ -683,29 +687,25 @@ class ImageInferencePage(FunctionPage):
                 f.write("\n".join(html))
         except Exception as e:
             QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
-
-        try:
-            rows = []
-            for i, box in enumerate(boxes):
-                cid = int(box.cls[0])
-                cname = res.names.get(cid, str(cid))
-                cconf = float(box.conf[0]) if box.conf is not None else 0.0
-                x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
-                rows.append(
-                    {
-                        "bolt_id": i + 1,
-                        "class": cname,
-                        "confidence": cconf,
-                        "x1": x1,
-                        "y1": y1,
-                        "x2": x2,
-                        "y2": y2,
-                    }
-                )
-            csv_path = os.path.join(scan_dir, f"{base}_bolt_detection_result.csv")
-            pd.DataFrame(rows).to_csv(csv_path, index=False)
-        except Exception as e:
-            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
+        rows = []
+        for i, box in enumerate(boxes):
+            cid = int(box.cls[0])
+            cname = res.names.get(cid, str(cid))
+            cconf = float(box.conf[0]) if box.conf is not None else 0.0
+            x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
+            rows.append(
+                {
+                    "image": os.path.basename(fp),
+                    "bolt_id": i + 1,
+                    "class": cname,
+                    "confidence": cconf,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
+        return rows
 
     def on_back(self):
         self.main_window.gotoPage(1)
@@ -905,8 +905,8 @@ class VideoInferencePage(FunctionPage):
             else:
                 upload_msgs.append("MQTT 未启用自动上传或未配置服务器地址")
 
-# ---- WebDAV 自动上传 ----
-# 条件：开启自动上传且配置了服务器地址
+                #---- WebDAV 自动上传 ----
+                # 条件：开启自动上传且配置了服务器地址
             if getattr(mw, 'webdav_upload_mode', 'manual') == 'auto' and getattr(mw, 'webdav_host', ''):
                 try:
                     dav = WebDAVUploader(
