@@ -538,7 +538,8 @@ class ImageInferencePage(FunctionPage):
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            self.run_inference(fp, scan_dir)
+            rows, sample_orig, sample_ann = self.run_inference([fp], scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, scan_dir)
             QMessageBox.information(
                 self, "检测结果归档完成", f"本次检测所有结果已保存到：\n{scan_dir}"
             )
@@ -567,146 +568,149 @@ class ImageInferencePage(FunctionPage):
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
         files = [
             os.path.join(dir_path, f)
-            for f in os.listdir(dir_path)
+            for f in sorted(os.listdir(dir_path))
             if os.path.splitext(f)[1].lower() in exts
         ]
         if not files:
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
-        all_rows = []
-        for fp in files:
-            try:
-                rows = self.run_inference(fp, scan_dir)
-                all_rows.extend(rows)
-                QApplication.processEvents()
-            except Exception as e:
-                QMessageBox.warning(self, "处理失败", f"文件 {fp} 处理失败: {e}")
         try:
-            cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
-            pd.DataFrame(all_rows, columns=cols).to_csv(
-                os.path.join(scan_dir, "bolt_detection_result.csv"), index=False
+            rows, sample_orig, sample_ann = self.run_inference(files, scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, scan_dir)
+            QMessageBox.information(
+                self,
+                "检测完成",
+                f"已处理 {len(files)} 张图片，结果保存在：\n{scan_dir}",
             )
+            mw = self.main_window
+            if getattr(mw, "webdav_upload_mode", "manual") == "auto" and getattr(
+                mw, "webdav_host", "",
+            ):
+                try:
+                    dav = WebDAVUploader(
+                        host=mw.webdav_host,
+                        username=mw.webdav_user,
+                        password=mw.webdav_pass,
+                        remote_path=mw.webdav_remote_path,
+                    )
+                    dav.upload_batch(scan_dir)
+                    QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
+                except Exception as e:
+                    QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
         except Exception as e:
-            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
-        QMessageBox.information(
-            self,
-            "检测完成",
-            f"已处理 {len(files)} 张图片，结果保存在：\n{scan_dir}",
+            QMessageBox.critical(self, "错误", f"发生错误: {e}")
+
+    def run_inference(self, files, scan_dir):
+        results = self.model.track(
+            source=files,
+            conf=self.conf_thres,
+            device=self.device_option,
+            tracker=BOTSORT_CONFIG,
+            imgsz=640,
+            stream=True,
+            verbose=False,
         )
-        mw = self.main_window
-        if getattr(mw, "webdav_upload_mode", "manual") == "auto" and getattr(
-            mw, "webdav_host", ""
-        ):
-            try:
-                dav = WebDAVUploader(
-                    host=mw.webdav_host,
-                    username=mw.webdav_user,
-                    password=mw.webdav_pass,
-                    remote_path=mw.webdav_remote_path,
+        rows = []
+        sample_orig = None
+        sample_ann = None
+        detail_lines = []
+        for idx, (fp, res) in enumerate(zip(files, results)):
+            orig_bgr = res.orig_img
+            ann_bgr = res.plot()
+            ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
+            base, ext = os.path.splitext(os.path.basename(fp))
+            ann_path = os.path.join(scan_dir, f"{base}_annotated{ext}")
+            Image.fromarray(ann_rgb).save(ann_path)
+
+            if idx == 0:
+                sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
+                sample_ann = Image.fromarray(ann_rgb)
+                w0, h0 = sample_orig.size
+                r = min(600 / w0, 400 / h0, 1.0)
+                w1, h1 = int(w0 * r), int(h0 * r)
+                self.label_orig.setPixmap(
+                    pil_to_pixmap(sample_orig.resize((w1, h1), Image.Resampling.LANCZOS))
                 )
-                dav.upload_batch(scan_dir)
-                QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
-            except Exception as e:
-                QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
+                self.label_res.setPixmap(
+                    pil_to_pixmap(sample_ann.resize((w1, h1), Image.Resampling.LANCZOS))
+                )
 
-    def run_inference(self, fp, scan_dir):
-        pil_img = Image.open(fp).convert("RGB")
-        w0, h0 = pil_img.size
-        r = min(600 / w0, 400 / h0, 1.0)
-        w1, h1 = int(w0 * r), int(h0 * r)
-        pil_resize = pil_img.resize((w1, h1), Image.Resampling.LANCZOS)
-        self.label_orig.setPixmap(pil_to_pixmap(pil_resize))
-
-        bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        res = self.model.predict(
-            source=bgr, conf=self.conf_thres, device=self.device_option, imgsz=640
-        )[0]
-        ann_bgr = res.plot(img=bgr.copy())
-
-        ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
-        ann_pil = Image.fromarray(ann_rgb).resize((w1, h1), Image.Resampling.LANCZOS)
-        self.label_res.setPixmap(pil_to_pixmap(ann_pil))
-
-        boxes = res.boxes
-        if len(boxes) == 0:
-            self.text_detail.setPlainText("未检测到任何目标")
-        else:
-            info_lines = []
+            boxes = res.boxes
+            ids = boxes.id.cpu().tolist() if boxes.id is not None else []
             for i, box in enumerate(boxes):
                 cid = int(box.cls[0])
-                cnam = res.names.get(cid, str(cid))
+                cname = res.names.get(cid, str(cid))
                 cconf = float(box.conf[0]) if box.conf is not None else 0.0
-                coords = [round(x, 2) for x in box.xyxy[0].tolist()]
-                info_lines.append(
-                    f"目标{i+1}: 类别={cnam}, 置信度={cconf:.3f}, 坐标={coords}"
-                )
-            self.text_detail.setPlainText("\n".join(info_lines))
-
-        base = os.path.splitext(os.path.basename(fp))[0]
-        ext = os.path.splitext(fp)[1]
-
-        try:
-            ann_name = f"{base}_annotated{ext}"
-            ann_path = os.path.join(scan_dir, ann_name)
-            Image.fromarray(ann_rgb).save(ann_path)
-        except Exception as e:
-            QMessageBox.warning(self, "拷贝标注失败", f"标注图片保存失败: {e}")
-
-        try:
-            fmt = "PNG"
-            if ext.lower() in [".jpg", ".jpeg"]:
-                fmt = "JPEG"
-            orig_buf = io.BytesIO()
-            pil_img.save(orig_buf, format=fmt)
-            orig_b64 = base64.b64encode(orig_buf.getvalue()).decode("utf-8")
-            orig_data_uri = f"data:image/{fmt.lower()};base64,{orig_b64}"
-            ann_buf = io.BytesIO()
-            Image.fromarray(ann_rgb).save(ann_buf, format=fmt)
-            ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
-            ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
-            html = []
-            html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
-            html.append("<h1>图片检测报告</h1>")
-            html.append(f"<p><b>原始图像：</b><br><img src='{orig_data_uri}' width='600'></p>")
-            html.append(f"<p><b>标注结果图像：</b><br><img src='{ann_data_uri}' width='600'></p>")
-            html.append("<h2>检测结果</h2>")
-            if len(boxes) == 0:
-                html.append("<p>未检测到任何目标。</p>")
-            else:
-                html.append("<ul>")
-                for i, box in enumerate(boxes):
-                    cid = int(box.cls[0])
-                    cname = res.names.get(cid, str(cid))
-                    bolt_id = i + 1
-                    html.append(f"<li>螺栓编号 {bolt_id}: 状态 = {cname}</li>")
-                html.append("</ul>")
-            html.append("</body></html>")
-            report_path = os.path.join(scan_dir, f"{base}_report.html")
-            with open(report_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(html))
-        except Exception as e:
-            QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
-        rows = []
-        for i, box in enumerate(boxes):
-            cid = int(box.cls[0])
-            cname = res.names.get(cid, str(cid))
-            cconf = float(box.conf[0]) if box.conf is not None else 0.0
-            x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
-            rows.append(
-                {
+                x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
+                bolt_id = int(ids[i]) if i < len(ids) else i + 1
+                rows.append({
                     "image": os.path.basename(fp),
-                    "bolt_id": i + 1,
+                    "bolt_id": bolt_id,
                     "class": cname,
                     "confidence": cconf,
                     "x1": x1,
                     "y1": y1,
                     "x2": x2,
                     "y2": y2,
-                }
-            )
-        return rows
+                })
+                detail_lines.append(
+                    f"{os.path.basename(fp)} - ID {bolt_id} - {cname}({cconf:.3f})"
+                )
+        self.text_detail.setPlainText("\n".join(detail_lines))
+        return rows, sample_orig, sample_ann
 
+    def archive_results(self, rows, sample_orig, sample_ann, scan_dir):
+        try:
+            cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+            pd.DataFrame(rows, columns=cols).to_csv(
+                os.path.join(scan_dir, "bolt_detection_result.csv"), index=False
+            )
+        except Exception as e:
+            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
+        try:
+            fmt = "PNG"
+            orig_buf = io.BytesIO()
+            sample_orig.save(orig_buf, format=fmt)
+            orig_b64 = base64.b64encode(orig_buf.getvalue()).decode("utf-8")
+            orig_data_uri = f"data:image/{fmt.lower()};base64,{orig_b64}"
+            ann_buf = io.BytesIO()
+            sample_ann.save(ann_buf, format=fmt)
+            ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
+            ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
+            html = []
+            html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
+            html.append("<h1>图片批次检测报告</h1>")
+            html.append(
+                f"<p><b>示例原始图像：</b><br><img src='{orig_data_uri}' width='600'></p>"
+            )
+            html.append(
+                f"<p><b>示例标注图像：</b><br><img src='{ann_data_uri}' width='600'></p>"
+            )
+            html.append("<h2>检测结果明细</h2>")
+            summary = {}
+            for r in rows:
+                bid = r["bolt_id"]
+                if bid not in summary or r["confidence"] > summary[bid]["confidence"]:
+                    summary[bid] = {
+                        "bolt_id": bid,
+                        "class": r["class"],
+                        "confidence": r["confidence"],
+                    }
+            html.append(
+                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
+            )
+            for bid in sorted(summary):
+                s = summary[bid]
+                html.append(
+                    f"<tr><td>{s['bolt_id']}</td><td>{s['class']}</td><td>{s['confidence']:.3f}</td></tr>"
+                )
+            html.append("</table></body></html>")
+            report_path = os.path.join(scan_dir, "bolt_detection_report.html")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(html))
+        except Exception as e:
+            QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
     def on_back(self):
         self.main_window.gotoPage(1)
 
@@ -905,8 +909,8 @@ class VideoInferencePage(FunctionPage):
             else:
                 upload_msgs.append("MQTT 未启用自动上传或未配置服务器地址")
 
-                #---- WebDAV 自动上传 ----
-                # 条件：开启自动上传且配置了服务器地址
+# ---- WebDAV 自动上传 ----
+# 条件：开启自动上传且配置了服务器地址
             if getattr(mw, 'webdav_upload_mode', 'manual') == 'auto' and getattr(mw, 'webdav_host', ''):
                 try:
                     dav = WebDAVUploader(
