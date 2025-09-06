@@ -7,6 +7,7 @@ import warnings
 import hashlib
 import base64
 import io
+import re
 import datetime
 import cv2
 from PIL import Image
@@ -566,11 +567,15 @@ class ImageInferencePage(FunctionPage):
         if not dir_path:
             return
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-        files = [
-            os.path.join(dir_path, f)
-            for f in sorted(os.listdir(dir_path))
+        names = [
+            f
+            for f in os.listdir(dir_path)
             if os.path.splitext(f)[1].lower() in exts
         ]
+        def _num_key(name):
+            m = re.search(r"\d+", name)
+            return int(m.group()) if m else float("inf")
+        files = [os.path.join(dir_path, f) for f in sorted(names, key=_num_key)]
         if not files:
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
@@ -602,20 +607,31 @@ class ImageInferencePage(FunctionPage):
             QMessageBox.critical(self, "错误", f"发生错误: {e}")
 
     def run_inference(self, files, scan_dir):
-        results = self.model.track(
+        files = sorted(
+            files,
+            key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group())
+            if re.search(r"\d+", os.path.basename(p))
+            else float("inf"),
+        )
+        results_gen = self.model.track(
             source=files,
             conf=self.conf_thres,
             device=self.device_option,
             tracker=BOTSORT_CONFIG,
             imgsz=640,
             stream=True,
+            persist=True,
             verbose=False,
         )
+
+        id_map = {}
+        next_id = 1
         rows = []
         sample_orig = None
         sample_ann = None
         detail_lines = []
-        for idx, (fp, res) in enumerate(zip(files, results)):
+
+        for idx, (fp, res) in enumerate(zip(files, results_gen)):
             orig_bgr = res.orig_img
             ann_bgr = res.plot()
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
@@ -636,17 +652,23 @@ class ImageInferencePage(FunctionPage):
                     pil_to_pixmap(sample_ann.resize((w1, h1), Image.Resampling.LANCZOS))
                 )
 
-            boxes = res.boxes
-            ids = boxes.id.cpu().tolist() if boxes.id is not None else []
-            for i, box in enumerate(boxes):
-                cid = int(box.cls[0])
+            for box in res.boxes:
+                raw_id = getattr(box, "id", None)
+                if raw_id is None:
+                    continue
+                rid = int(raw_id.item()) if hasattr(raw_id, "item") else int(raw_id)
+                if rid not in id_map:
+                    id_map[rid] = next_id
+                    next_id += 1
+                stable_id = id_map[rid]
+
+                cid = int(box.cls[0]) if box.cls is not None else -1
                 cname = res.names.get(cid, str(cid))
                 cconf = float(box.conf[0]) if box.conf is not None else 0.0
                 x1, y1, x2, y2 = [round(x, 2) for x in box.xyxy[0].tolist()]
-                bolt_id = int(ids[i]) if i < len(ids) else i + 1
                 rows.append({
                     "image": os.path.basename(fp),
-                    "bolt_id": bolt_id,
+                    "bolt_id": stable_id,
                     "class": cname,
                     "confidence": cconf,
                     "x1": x1,
@@ -655,8 +677,15 @@ class ImageInferencePage(FunctionPage):
                     "y2": y2,
                 })
                 detail_lines.append(
-                    f"{os.path.basename(fp)} - ID {bolt_id} - {cname}({cconf:.3f})"
+                    f"{os.path.basename(fp)} - ID {stable_id} - {cname}({cconf:.3f})"
                 )
+
+        if hasattr(self.model, "tracker") and self.model.tracker is not None:
+            try:
+                self.model.tracker.tracker.reset()
+            except Exception:
+                pass
+
         self.text_detail.setPlainText("\n".join(detail_lines))
         return rows, sample_orig, sample_ann
 
