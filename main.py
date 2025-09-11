@@ -16,6 +16,8 @@ import pandas as pd
 import paho.mqtt.client as mqtt
 from webdav3.client import Client
 import requests
+import json
+from urllib.parse import urljoin
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -81,7 +83,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QTextEdit,
     QSlider, QLineEdit, QGroupBox, QProgressBar, QFrame, QGridLayout,
-    QStackedWidget, QDialog, QSizePolicy
+    QStackedWidget, QDialog, QSizePolicy, QProgressDialog
 )
 
 import cv2
@@ -1064,6 +1066,8 @@ class SettingsPage(FunctionPage):
         self.content_layout.addWidget(btn_upload)  # 或合适的布局位置
         btn_webdav_upload = QPushButton("WebDAV云端上传设置", clicked=lambda: self.main_window.gotoPage(8))
         self.content_layout.addWidget(btn_webdav_upload)
+        btn_ota = QPushButton("OTA设置", clicked=lambda: self.main_window.gotoPage(9))
+        self.content_layout.addWidget(btn_ota)
 
         # 模型权重路径
         h1 = QHBoxLayout()
@@ -1673,6 +1677,135 @@ class WebDAVUploadSettingsPage(FunctionPage):
     def on_back(self):
         self.main_window.gotoPage(5)  # 返回设置页或你想返回的页面
 
+class OTADownloadThread(QThread):
+    """下载模型文件并汇报进度"""
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, url, dest, auth=None, parent=None):
+        super().__init__(parent)
+        self.url = url
+        self.dest = dest
+        self.auth = auth
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            with requests.Session() as sess:
+                if self.auth:
+                    sess.auth = self.auth
+                head = sess.head(self.url, allow_redirects=True)
+                head.raise_for_status()
+                total = int(head.headers.get('Content-Length', 0))
+                r = sess.get(self.url, stream=True)
+                r.raise_for_status()
+                downloaded = 0
+                with open(self.dest, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if self._cancel:
+                            raise Exception('cancelled')
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total:
+                                self.progress.emit(int(downloaded * 100 / total))
+            self.finished.emit(True, 'success')
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class OTASettingsPage(FunctionPage):
+    """OTA 更新设置页面"""
+    def __init__(self, mw, parent=None):
+        super().__init__(mw, "OTA 设置", parent)
+        self.thread = None
+        self.progress = None
+        self.initUI()
+
+    def initUI(self):
+        self.ed_manifest = QLineEdit(self.main_window.ota_manifest_url)
+        self.ed_manifest.setPlaceholderText("OTA 服务器 URL（manifest）")
+        self.content_layout.addWidget(QLabel("OTA 服务器 URL（manifest）:"))
+        self.content_layout.addWidget(self.ed_manifest)
+
+        btn_check = QPushButton("检查更新", clicked=self.check_update)
+        self.content_layout.addWidget(btn_check)
+
+    def on_back(self):
+        self.main_window.gotoPage(5)
+
+    def check_update(self):
+        url = self.ed_manifest.text().strip()
+        if not url:
+            QMessageBox.warning(self, "提示", "请先填写 OTA manifest URL")
+            return
+        self.main_window.ota_manifest_url = url
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            manifest = r.json()
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"获取manifest失败: {e}")
+            return
+
+        remote_ver = manifest.get('version', '')
+        model_path = manifest.get('model', '')
+        if not model_path:
+            QMessageBox.warning(self, "错误", "manifest缺少model字段")
+            return
+        if remote_ver == self.main_window.model_version:
+            QMessageBox.information(self, "提示", "已是最新")
+            return
+
+        model_url = urljoin(url, model_path)
+        tmp_path = self.main_window.model_weight_path + '.tmp'
+        self.thread = OTADownloadThread(model_url, tmp_path)
+        self.thread.progress.connect(self.on_progress)
+        self.thread.finished.connect(lambda ok, msg: self.on_download_finished(ok, msg, remote_ver))
+
+        self.progress = QProgressDialog("下载更新中...", "取消", 0, 100, self)
+        self.progress.setWindowModality(Qt.WindowModal)
+        self.progress.canceled.connect(self.thread.cancel)
+        self.progress.show()
+
+        self.thread.start()
+
+    def on_progress(self, val):
+        if self.progress:
+            self.progress.setValue(val)
+
+    def on_download_finished(self, ok, msg, remote_ver):
+        if self.progress:
+            self.progress.close()
+        tmp_path = self.main_window.model_weight_path + '.tmp'
+        dest = self.main_window.model_weight_path
+        bak = dest + '.bak'
+        if ok:
+            try:
+                if os.path.exists(dest):
+                    shutil.copy2(dest, bak)
+                os.replace(tmp_path, dest)
+                with open(self.main_window.model_version_file, 'w', encoding='utf-8') as f:
+                    f.write(remote_ver)
+                self.main_window.model_version = remote_ver
+                self.main_window.reload_model()
+                QMessageBox.information(self, "成功", "已更新")
+            except Exception as e:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+                if os.path.exists(bak):
+                    shutil.copy2(bak, dest)
+                QMessageBox.warning(self, "失败", f"更新失败并已回滚: {e}")
+        else:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            if os.path.exists(bak) and not os.path.exists(dest):
+                shutil.copy2(bak, dest)
+            QMessageBox.warning(self, "失败", f"更新失败: {msg}")
+
 ###############################################################################
 #   总首页 & 主窗口
 ###############################################################################
@@ -1775,12 +1908,23 @@ class MainWindow(QMainWindow):
         self.webdav_remote_path = "/bolt_upload/"
         self.webdav_upload_mode = "manual"  # "manual" or "auto"
 
+        self.ota_manifest_url = ""
+
         # 资源路径由全局常量管理
         self.crane_image_path  = CRANE_IMAGE_PATH
         self.model_weight_path = WEIGHTS_PATH
         self.conf_thres        = 0.7
         self.device_option     = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.model             = None
+
+        self.model_version_file = os.path.splitext(self.model_weight_path)[0] + ".version"
+        self.model_version = ""
+        if os.path.exists(self.model_version_file):
+            try:
+                with open(self.model_version_file, 'r', encoding='utf-8') as f:
+                    self.model_version = f.read().strip()
+            except Exception:
+                self.model_version = ""
 
         self.init_model()
         self.initUI()
@@ -1821,11 +1965,13 @@ class MainWindow(QMainWindow):
         self.page_vib     = VibrationPage(self)                                                         # 6
         self.page_upload = UploadSettingsPage(self)                                                     #7
         self.page_webdav_upload = WebDAVUploadSettingsPage(self)                                         #8
+        self.page_ota    = OTASettingsPage(self)  #9
                
         for p in [
             self.page_main, self.page_vision, self.page_image,
             self.page_video, self.page_camera, self.page_setting,
-            self.page_vib, self.page_upload, self.page_webdav_upload
+            self.page_vib, self.page_upload, self.page_webdav_upload,
+            self.page_ota
         ]:
             self.stacked.addWidget(p)
         
