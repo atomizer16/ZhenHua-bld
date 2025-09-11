@@ -15,6 +15,7 @@ import shutil
 import pandas as pd
 import paho.mqtt.client as mqtt
 from webdav3.client import Client
+import requests
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -555,7 +556,7 @@ class ImageInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path,
                     )
-                    dav.upload_batch(scan_dir)
+                    dav.upload_batch(scan_dir, resume=True)
                     QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
                 except Exception as e:
                     QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
@@ -599,7 +600,7 @@ class ImageInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path,
                     )
-                    dav.upload_batch(scan_dir)
+                    dav.upload_batch(scan_dir, resume=True)
                     QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
                 except Exception as e:
                     QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
@@ -948,7 +949,7 @@ class VideoInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path
                     )
-                    dav.upload_batch(scan_dir)
+                    dav.upload_batch(scan_dir, resume=True)
                     upload_msgs.append("WebDAV 上传成功")
                 except Exception as e:
                     upload_msgs.append(f"WebDAV 上传失败：{e}")
@@ -1519,20 +1520,59 @@ class WebDAVUploader:
             'webdav_password': password or ''
         }
         self.client = Client(options)
+        self.host = host.rstrip('/')
+        self.session = requests.Session()
+        if username or password:
+            self.session.auth = (username or '', password or '')
         self.remote_path = remote_path if remote_path.endswith('/') else remote_path + '/'
 
-    def upload_file(self, local_filepath):
+    def _full_url(self, remote_fp):
+        from urllib.parse import urljoin
+        return urljoin(self.host + '/', remote_fp.lstrip('/'))
+
+    def _get_remote_size(self, remote_fp):
+        url = self._full_url(remote_fp)
+        try:
+            r = self.session.head(url)
+            if r.status_code == 200 and 'Content-Length' in r.headers:
+                return int(r.headers['Content-Length'])
+        except Exception:
+            pass
+        return 0
+
+    def upload_file(self, local_filepath, resume=True):
         filename = os.path.basename(local_filepath)
         remote_fp = self.remote_path + filename
-        self.client.upload_sync(remote_path=remote_fp, local_path=local_filepath)
-        print(f"WebDAV已上传: {filename} 到 {remote_fp}")
+        if resume:
+            self._upload_file_resumable(local_filepath, remote_fp)
+        else:
+            self.client.upload_sync(remote_path=remote_fp, local_path=local_filepath)
+            print(f"WebDAV已上传: {filename} 到 {remote_fp}")
 
-    def upload_batch(self, batch_dir):
+    def _upload_file_resumable(self, local_filepath, remote_fp):
+        filename = os.path.basename(local_filepath)
+        local_size = os.path.getsize(local_filepath)
+        remote_size = self._get_remote_size(remote_fp)
+        if remote_size >= local_size:
+            print(f"WebDAV已存在: {filename}, 跳过上传")
+            return
+        url = self._full_url(remote_fp)
+        with open(local_filepath, 'rb') as f:
+            if remote_size > 0:
+                f.seek(remote_size)
+            headers = {
+                'Content-Range': f'bytes {remote_size}-{local_size-1}/{local_size}'
+            }
+            r = self.session.put(url, data=f, headers=headers)
+            r.raise_for_status()
+        print(f"WebDAV已上传: {filename} ({remote_size}->{local_size}) 到 {remote_fp}")
+
+    def upload_batch(self, batch_dir, resume=True):
         # 批次目录下所有文件全部上传
         for name in os.listdir(batch_dir):
             fp = os.path.join(batch_dir, name)
             if os.path.isfile(fp):
-                self.upload_file(fp)
+                self.upload_file(fp, resume=resume)
 
 class WebDAVUploadSettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
@@ -1623,7 +1663,7 @@ class WebDAVUploadSettingsPage(FunctionPage):
                 remote_path=self.main_window.webdav_remote_path
             )
             try:
-                uploader.upload_batch(latest)
+                uploader.upload_batch(latest, resume=True)
                 QMessageBox.information(self, "上传完成", f"已上传：{latest}")
             except Exception as e:
                 QMessageBox.warning(self, "上传失败", f"上传失败：{e}")
