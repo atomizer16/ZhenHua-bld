@@ -9,6 +9,7 @@ import base64
 import io
 import re
 import datetime
+import math
 import cv2
 from PIL import Image
 import shutil
@@ -17,7 +18,8 @@ import paho.mqtt.client as mqtt
 from webdav3.client import Client
 import requests
 import json
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse, unquote
+from xml.etree import ElementTree
 
 # —— 新增：动态获取应用根目录 ——
 if getattr(sys, "frozen", False):
@@ -1584,14 +1586,40 @@ class WebDAVUploader:
         }
         self.client = Client(options)
         self.host = host.rstrip('/')
+        self.username = username or ''
         self.session = requests.Session()
         if username or password:
-            self.session.auth = (username or '', password or '')
+            self.session.auth = (self.username, password or '')
         self.remote_path = remote_path if remote_path.endswith('/') else remote_path + '/'
+        self.chunk_size = 10 * 1024 * 1024  # 10MB 默认分块大小
+        self._chunk_base_url = self._init_chunk_base_url()
+
+    def _init_chunk_base_url(self):
+        """根据Nextcloud规则构造分块上传基础URL"""
+        if not self.username:
+            return None
+        parsed = urlparse(self.host)
+        marker = f"/remote.php/dav/files/{self.username}"
+        if marker not in parsed.path:
+            return None
+        chunk_path = parsed.path.replace(
+            f"/remote.php/dav/files/{self.username}",
+            f"/remote.php/dav/uploads/{self.username}",
+            1
+        )
+        chunk_url = urlunparse(parsed._replace(path=chunk_path))
+        return chunk_url.rstrip('/')
 
     def _full_url(self, remote_fp):
-        from urllib.parse import urljoin
         return urljoin(self.host + '/', remote_fp.lstrip('/'))
+
+    def _chunk_url(self, upload_id, chunk_name=None):
+        if not self._chunk_base_url:
+            return None
+        base = f"{self._chunk_base_url}/{upload_id}"
+        if chunk_name is None:
+            return base
+        return f"{base}/{chunk_name}"
 
     def _get_remote_size(self, remote_fp):
         url = self._full_url(remote_fp)
@@ -1603,11 +1631,70 @@ class WebDAVUploader:
             pass
         return 0
 
+    def _mkcol(self, url):
+        try:
+            r = self.session.request("MKCOL", url)
+            if r.status_code in (200, 201, 204, 405):
+                return
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"无法创建远程目录: {exc}")
+
+    def _list_existing_chunks(self, upload_id):
+        chunk_folder_url = self._chunk_url(upload_id)
+        if not chunk_folder_url:
+            return []
+        url = chunk_folder_url + "/"
+        try:
+            resp = self.session.request("PROPFIND", url, headers={"Depth": "1"})
+        except requests.RequestException:
+            return []
+        if resp.status_code != 207:
+            return []
+        try:
+            xml_root = ElementTree.fromstring(resp.content)
+        except ElementTree.ParseError:
+            return []
+        ns = {"d": "DAV:"}
+        chunk_indices = set()
+        for response in xml_root.findall("d:response", ns):
+            href = response.find("d:href", ns)
+            if href is None or not href.text:
+                continue
+            path = unquote(href.text)
+            name = os.path.basename(path.rstrip('/'))
+            if not name or name == upload_id:
+                continue
+            try:
+                chunk_indices.add(int(name))
+            except ValueError:
+                continue
+        return sorted(chunk_indices)
+
+    def _generate_upload_id(self, local_filepath):
+        stat = os.stat(local_filepath)
+        raw = f"{os.path.abspath(local_filepath)}|{stat.st_size}|{int(stat.st_mtime)}"
+        return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+    def _ensure_remote_dir(self, remote_fp):
+        directory = os.path.dirname(remote_fp)
+        if not directory or directory == '/':
+            return
+        segments = [seg for seg in directory.split('/') if seg]
+        current = ''
+        for seg in segments:
+            current += '/' + seg
+            url = self._full_url(current + '/')
+            self._mkcol(url)
+
     def upload_file(self, local_filepath, resume=True):
         filename = os.path.basename(local_filepath)
         remote_fp = self.remote_path + filename
         if resume:
-            self._upload_file_resumable(local_filepath, remote_fp)
+            if self._chunk_base_url:
+                self._upload_file_chunked(local_filepath, remote_fp)
+            else:
+                self._upload_file_resumable(local_filepath, remote_fp)
         else:
             self.client.upload_sync(remote_path=remote_fp, local_path=local_filepath)
             print(f"WebDAV已上传: {filename} 到 {remote_fp}")
@@ -1629,6 +1716,68 @@ class WebDAVUploader:
             r = self.session.put(url, data=f, headers=headers)
             r.raise_for_status()
         print(f"WebDAV已上传: {filename} ({remote_size}->{local_size}) 到 {remote_fp}")
+
+    def _upload_file_chunked(self, local_filepath, remote_fp):
+        if not self._chunk_base_url:
+            self._upload_file_resumable(local_filepath, remote_fp)
+            return
+        filename = os.path.basename(local_filepath)
+        local_size = os.path.getsize(local_filepath)
+        remote_size = self._get_remote_size(remote_fp)
+        if remote_size >= local_size:
+            print(f"WebDAV已存在: {filename}, 跳过上传")
+            return
+
+        self._ensure_remote_dir(remote_fp)
+
+        upload_id = self._generate_upload_id(local_filepath)
+        chunk_folder_url = self._chunk_url(upload_id) + '/'
+        parent_url = self._chunk_base_url + '/'
+        self._mkcol(parent_url)
+        self._mkcol(chunk_folder_url)
+
+        existing_chunks = self._list_existing_chunks(upload_id)
+        uploaded_set = set(existing_chunks)
+        total_chunks = max(1, math.ceil(local_size / self.chunk_size))
+
+        with open(local_filepath, 'rb') as f:
+            for index in range(total_chunks):
+                if index in uploaded_set:
+                    continue
+                f.seek(index * self.chunk_size)
+                data = f.read(self.chunk_size)
+                if not data:
+                    break
+                chunk_name = f"{index:016d}"
+                chunk_url = self._chunk_url(upload_id, chunk_name)
+                if chunk_url is None:
+                    raise RuntimeError("未正确初始化分块上传URL")
+                headers = {
+                    'Content-Type': 'application/octet-stream',
+                    'OC-Chunked': '1',
+                    'OC-Total-Length': str(local_size),
+                    'OC-Chunk-Size': str(len(data)),
+                    'OC-Chunk-Offset': str(index * self.chunk_size)
+                }
+                try:
+                    resp = self.session.put(chunk_url, data=data, headers=headers)
+                    resp.raise_for_status()
+                except requests.RequestException as exc:
+                    raise RuntimeError(f"上传分块 {chunk_name} 失败: {exc}")
+                print(f"WebDAV分块上传: {filename} chunk {index}")
+
+        destination_url = self._full_url(remote_fp)
+        move_headers = {
+            'Destination': destination_url,
+            'Overwrite': 'T'
+        }
+        try:
+            resp = self.session.request("MOVE", chunk_folder_url.rstrip('/'), headers=move_headers)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"合并分块失败: {exc}")
+
+        print(f"WebDAV已分块上传: {filename} ({local_size}) 到 {remote_fp}")
 
     def upload_batch(self, batch_dir, resume=True):
         # 批次目录下所有文件全部上传
