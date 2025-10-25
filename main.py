@@ -84,13 +84,261 @@ from PyQt5.QtGui import QPixmap, QImage, QFont
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QTextEdit,
-    QSlider, QLineEdit, QGroupBox, QProgressBar, QFrame, QGridLayout,
-    QStackedWidget, QDialog, QSizePolicy, QProgressDialog
+    QSlider, QLineEdit, QProgressBar, QFrame, QGridLayout,
+    QStackedWidget, QDialog, QSizePolicy, QProgressDialog, QScrollArea
 )
 
 import cv2
 from ultralytics import YOLO
 from PIL import Image
+
+
+###############################################################################
+#   统一的界面视觉与交互规范
+###############################################################################
+class UITheme:
+    """集中管理界面配色、字体与空间规范。"""
+
+    FONT_FAMILY = "Microsoft YaHei"
+    FONT_SIZE_BASE = 12
+    FONT_SIZE_SUBTITLE = 14
+    FONT_SIZE_TITLE = 18
+
+    COLOR_BACKGROUND = "#F3F6FC"
+    COLOR_SURFACE = "#FFFFFF"
+    COLOR_PRIMARY = "#2563EB"
+    COLOR_PRIMARY_HOVER = "#1D4ED8"
+    COLOR_PRIMARY_PRESSED = "#1E40AF"
+    COLOR_SECONDARY = "#E8EEF9"
+    COLOR_SECONDARY_TEXT = "#1F2937"
+    COLOR_TEXT_MUTED = "#6B7280"
+    COLOR_BORDER = "#D6E0F5"
+
+    COLOR_SUCCESS = "#2E8540"
+    COLOR_WARNING = "#F59E0B"
+    COLOR_DANGER = "#DC2626"
+
+    CONTROL_HEIGHT = 40
+    CONTROL_RADIUS = 10
+    SECTION_SPACING = 16
+
+    @staticmethod
+    def font(size=None, weight=QFont.Normal):
+        font = QFont(UITheme.FONT_FAMILY, size or UITheme.FONT_SIZE_BASE)
+        font.setWeight(weight)
+        return font
+
+    @staticmethod
+    def title_font():
+        font = QFont(UITheme.FONT_FAMILY, UITheme.FONT_SIZE_TITLE, QFont.Bold)
+        return font
+
+    @staticmethod
+    def subtitle_font(weight=QFont.Medium):
+        font = QFont(UITheme.FONT_FAMILY, UITheme.FONT_SIZE_SUBTITLE, weight)
+        return font
+
+
+def style_primary_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    button.setFont(UITheme.subtitle_font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: {UITheme.COLOR_PRIMARY};
+            color: #FFFFFF;
+            border: none;
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+        }}
+        QPushButton:hover {{
+            background-color: {UITheme.COLOR_PRIMARY_HOVER};
+        }}
+        QPushButton:pressed {{
+            background-color: {UITheme.COLOR_PRIMARY_PRESSED};
+        }}
+        QPushButton:disabled {{
+            background-color: {UITheme.COLOR_SECONDARY};
+            color: {UITheme.COLOR_TEXT_MUTED};
+        }}
+        """
+    )
+
+
+def style_secondary_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    button.setFont(UITheme.subtitle_font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: {UITheme.COLOR_SURFACE};
+            color: {UITheme.COLOR_SECONDARY_TEXT};
+            border: 1px solid {UITheme.COLOR_BORDER};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+        }}
+        QPushButton:hover {{
+            background-color: {UITheme.COLOR_SECONDARY};
+        }}
+        QPushButton:pressed {{
+            background-color: {UITheme.COLOR_BORDER};
+        }}
+        QPushButton:disabled {{
+            color: {UITheme.COLOR_TEXT_MUTED};
+            background-color: {UITheme.COLOR_BACKGROUND};
+        }}
+        """
+    )
+
+
+def style_text_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setFlat(True)
+    button.setFont(UITheme.font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {UITheme.COLOR_PRIMARY};
+            border: none;
+            padding: 4px {UITheme.SECTION_SPACING // 2}px;
+            text-decoration: underline;
+        }}
+        QPushButton:hover {{
+            color: {UITheme.COLOR_PRIMARY_HOVER};
+        }}
+        QPushButton:pressed {{
+            color: {UITheme.COLOR_PRIMARY_PRESSED};
+        }}
+        """
+    )
+
+
+def style_input(widget: QLineEdit):
+    widget.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    widget.setFont(UITheme.font())
+    widget.setStyleSheet(
+        f"""
+        QLineEdit {{
+            border: 1px solid {UITheme.COLOR_BORDER};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+            background-color: {UITheme.COLOR_SURFACE};
+        }}
+        QLineEdit:focus {{
+            border: 2px solid {UITheme.COLOR_PRIMARY};
+        }}
+        QLineEdit:disabled {{
+            background-color: {UITheme.COLOR_SECONDARY};
+            color: {UITheme.COLOR_TEXT_MUTED};
+        }}
+        """
+    )
+
+
+def apply_dialog_frame(dialog: QDialog):
+    dialog.setStyleSheet(
+        f"""
+        QDialog {{
+            background-color: {UITheme.COLOR_SURFACE};
+        }}
+        QLabel {{
+            font-family: {UITheme.FONT_FAMILY};
+            color: {UITheme.COLOR_SECONDARY_TEXT};
+        }}
+        """
+    )
+
+
+def create_card_frame(parent=None):
+    frame = QFrame(parent)
+    frame.setObjectName("CardFrame")
+    frame.setStyleSheet(
+        f"""
+        QFrame#CardFrame {{
+            background-color: {UITheme.COLOR_SURFACE};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            border: 1px solid {UITheme.COLOR_BORDER};
+        }}
+        """
+    )
+    return frame
+
+
+def create_section_card(title: str, description: str = "", parent=None):
+    """Create a standard card with title (and optional description)."""
+    frame = create_card_frame(parent)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2)
+    layout.setSpacing(UITheme.SECTION_SPACING)
+
+    title_label = QLabel(title)
+    title_label.setFont(UITheme.subtitle_font())
+    layout.addWidget(title_label)
+
+    if description:
+        desc_label = QLabel(description)
+        desc_label.setWordWrap(True)
+        desc_label.setFont(UITheme.font())
+        desc_label.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+        layout.addWidget(desc_label)
+
+    return frame, layout
+
+
+def add_form_row(container_layout: QVBoxLayout, label_text: str, widget: QWidget):
+    row = QHBoxLayout()
+    row.setSpacing(UITheme.SECTION_SPACING // 2)
+    label = QLabel(label_text)
+    label.setFont(UITheme.font())
+    label.setMinimumWidth(120)
+    row.addWidget(label)
+    row.addWidget(widget)
+    container_layout.addLayout(row)
+    return row
+
+
+def create_navigation_card(title: str, description: str, parent=None):
+    card = create_card_frame(parent)
+    card.setObjectName("NavigationCard")
+    card.setCursor(Qt.PointingHandCursor)
+    card.setStyleSheet(
+        f"""
+        QFrame#NavigationCard {{
+            background-color: rgba(255, 255, 255, 0.92);
+            border-radius: {UITheme.CONTROL_RADIUS * 2}px;
+            border: 1px solid {UITheme.COLOR_BORDER};
+        }}
+        QFrame#NavigationCard:hover {{
+            border: 1px solid {UITheme.COLOR_PRIMARY};
+            background-color: #FFFFFF;
+        }}
+        """
+    )
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2,
+                              UITheme.SECTION_SPACING * 2)
+    layout.setSpacing(UITheme.SECTION_SPACING // 2)
+
+    title_label = QLabel(title)
+    title_label.setFont(UITheme.subtitle_font(QFont.DemiBold))
+    layout.addWidget(title_label)
+
+    desc_label = QLabel(description)
+    desc_label.setWordWrap(True)
+    desc_label.setFont(UITheme.font())
+    desc_label.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+    layout.addWidget(desc_label)
+
+    layout.addStretch()
+    return card
 
 ###############################################################################
 #   登录/注册/修改密码 模块
@@ -99,24 +347,37 @@ class RegisterDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("注册")
-        self.setFixedSize(300, 200)
+        self.setFixedSize(360, 280)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("创建新账户")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         # 密码输入
         self.edit_pass = QLineEdit()
         self.edit_pass.setPlaceholderText("密码")
         self.edit_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass)
         layout.addWidget(self.edit_pass)
         # 确认密码
         self.edit_pass2 = QLineEdit()
         self.edit_pass2.setPlaceholderText("确认密码")
         self.edit_pass2.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass2)
         layout.addWidget(self.edit_pass2)
         # 注册按钮
         btn_register = QPushButton("确认注册", clicked=self.do_register)
+        style_primary_button(btn_register)
         layout.addWidget(btn_register)
 
     def do_register(self):
@@ -149,29 +410,43 @@ class ChangePasswordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("修改密码")
-        self.setFixedSize(300, 200)
+        self.setFixedSize(360, 320)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("更新账户密码")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         # 旧密码输入
         self.edit_old_pass = QLineEdit()
         self.edit_old_pass.setPlaceholderText("当前密码")
         self.edit_old_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_old_pass)
         layout.addWidget(self.edit_old_pass)
         # 新密码输入
         self.edit_new_pass = QLineEdit()
         self.edit_new_pass.setPlaceholderText("新密码")
         self.edit_new_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_new_pass)
         layout.addWidget(self.edit_new_pass)
         # 确认新密码
         self.edit_new_pass2 = QLineEdit()
         self.edit_new_pass2.setPlaceholderText("确认新密码")
         self.edit_new_pass2.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_new_pass2)
         layout.addWidget(self.edit_new_pass2)
         # 确认修改按钮
         btn_change = QPushButton("确认修改", clicked=self.do_change)
+        style_primary_button(btn_change)
         layout.addWidget(btn_change)
 
     def do_change(self):
@@ -208,27 +483,53 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("用户登录")
-        self.setFixedSize(300, 180)
+        self.setFixedSize(420, 260)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("欢迎回来")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名和密码输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         self.edit_pass = QLineEdit()
         self.edit_pass.setPlaceholderText("密码")
         self.edit_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass)
         layout.addWidget(self.edit_pass)
         # 按钮布局
-        btn_layout = QHBoxLayout()
         btn_login = QPushButton("登录", clicked=self.do_login)
-        btn_register = QPushButton("注册", clicked=self.open_register)
-        btn_change = QPushButton("修改密码", clicked=self.open_change)
         btn_cancel = QPushButton("取消", clicked=self.reject)
-        btn_layout.addWidget(btn_login)
-        btn_layout.addWidget(btn_register)
-        btn_layout.addWidget(btn_change)
-        btn_layout.addWidget(btn_cancel)
-        layout.addLayout(btn_layout)
+        btn_register = QPushButton("注册新用户", clicked=self.open_register)
+        btn_change = QPushButton("修改密码", clicked=self.open_change)
+        style_primary_button(btn_login)
+        style_secondary_button(btn_cancel)
+        style_text_button(btn_register)
+        style_text_button(btn_change)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(UITheme.SECTION_SPACING)
+        actions_row.addWidget(btn_login)
+        actions_row.addWidget(btn_cancel)
+        actions_row.addStretch(1)
+
+        links_row = QHBoxLayout()
+        links_row.setSpacing(UITheme.SECTION_SPACING // 2)
+        btn_register.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        btn_change.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        links_row.addWidget(btn_register)
+        links_row.addWidget(btn_change)
+        links_row.addStretch(1)
+
+        layout.addLayout(actions_row)
+        layout.addLayout(links_row)
         self.username = None
 
     def do_login(self):
@@ -472,29 +773,76 @@ class FunctionPage(QWidget):
         super().__init__(parent)
         self.main_window = main_window
 
-        base = QVBoxLayout(self)
-        btn_back = QPushButton("返回上一页", clicked=self.on_back)
-        btn_back.setFixedWidth(120)
-        btn_back.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
+        self.setObjectName("FunctionPage")
+        self.setStyleSheet(
+            f"""
+            QWidget#FunctionPage {{
+                background-color: {UITheme.COLOR_BACKGROUND};
+                color: {UITheme.COLOR_SECONDARY_TEXT};
+            }}
+            QLabel {{
+                font-family: {UITheme.FONT_FAMILY};
+            }}
+            """
         )
-        base.addWidget(btn_back, alignment=Qt.AlignLeft)
+
+        base = QVBoxLayout(self)
+        base.setContentsMargins(UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2)
+        base.setSpacing(int(UITheme.SECTION_SPACING * 1.5))
+
+        header = QHBoxLayout()
+        header.setSpacing(UITheme.SECTION_SPACING)
+
+        btn_back = QPushButton("返回上一页", clicked=self.on_back)
+        style_secondary_button(btn_back)
+        btn_back.setFont(UITheme.font())
+        btn_back.setMinimumWidth(140)
+        header.addWidget(btn_back, alignment=Qt.AlignLeft)
+
+        title_container = QVBoxLayout()
+        title_container.setSpacing(UITheme.SECTION_SPACING // 3)
 
         title_label = QLabel(title_str)
-        title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        title_label.setAlignment(Qt.AlignCenter)
-        base.addWidget(title_label)
+        title_label.setObjectName("PageTitle")
+        title_label.setFont(UITheme.title_font())
+        title_label.setAlignment(Qt.AlignLeft)
+        title_container.addWidget(title_label)
 
-        self.content_layout = QVBoxLayout()
-        base.addLayout(self.content_layout)
-        base.addStretch()
-        self.setLayout(base)
+        self.subtitle_label = QLabel()
+        self.subtitle_label.setObjectName("PageSubtitle")
+        self.subtitle_label.setFont(UITheme.font())
+        self.subtitle_label.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+        self.subtitle_label.hide()
+        title_container.addWidget(self.subtitle_label)
+
+        header.addLayout(title_container, stretch=1)
+        header.addStretch()
+        base.addLayout(header)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        base.addWidget(self.scroll_area)
+
+        self._content_host = QWidget()
+        self.scroll_area.setWidget(self._content_host)
+        self.content_layout = QVBoxLayout(self._content_host)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(UITheme.SECTION_SPACING)
+        self.content_layout.setAlignment(Qt.AlignTop)
 
     def on_back(self):
         pass
+
+    def set_subtitle(self, text: str):
+        if text:
+            self.subtitle_label.setText(text)
+            self.subtitle_label.show()
+        else:
+            self.subtitle_label.hide()
 
 
 ###############################################################################
@@ -509,32 +857,70 @@ class ImageInferencePage(FunctionPage):
         self.initUI()
 
     def initUI(self):
+        quick_card, quick_layout = create_section_card(
+            "开始检测",
+            "选择单张图片或整个文件夹，系统会自动运行推理并生成检测归档。",
+        )
+        action_row = QHBoxLayout()
+        action_row.setSpacing(UITheme.SECTION_SPACING)
+
         btn_sel = QPushButton("选择图片文件", clicked=self.select_image)
-        btn_sel.setFixedWidth(200)
-        self.content_layout.addWidget(btn_sel, alignment=Qt.AlignCenter)
+        style_primary_button(btn_sel)
+        action_row.addWidget(btn_sel)
 
         btn_dir = QPushButton("选择图片文件夹", clicked=self.select_folder)
-        btn_dir.setFixedWidth(200)
-        self.content_layout.addWidget(btn_dir, alignment=Qt.AlignCenter)
+        style_secondary_button(btn_dir)
+        action_row.addWidget(btn_dir)
+        action_row.addStretch()
 
-        self.label_orig = QLabel()
-        self.label_orig.setFixedSize(600, 400)
-        self.label_orig.setStyleSheet("border:3px dashed gray;")
+        quick_layout.addLayout(action_row)
+        self.content_layout.addWidget(quick_card)
+
+        preview_card, preview_layout = create_section_card(
+            "检测预览",
+            "左侧显示原始图像，右侧显示模型标注结果，可根据窗口大小自适应。",
+        )
+        image_row = QHBoxLayout()
+        image_row.setSpacing(UITheme.SECTION_SPACING)
+
+        self.label_orig = QLabel("等待选择图片")
+        self.label_orig.setMinimumSize(360, 240)
         self.label_orig.setAlignment(Qt.AlignCenter)
+        self.label_orig.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.label_orig.setStyleSheet(
+            f"background-color: {UITheme.COLOR_BACKGROUND};"
+            f"border: 2px dashed {UITheme.COLOR_BORDER};"
+            f"border-radius: {UITheme.CONTROL_RADIUS}px;"
+        )
 
-        self.label_res = QLabel()
-        self.label_res.setFixedSize(600, 400)
-        self.label_res.setStyleSheet("border:3px dashed gray;")
+        self.label_res = QLabel("检测结果将在此展示")
+        self.label_res.setMinimumSize(360, 240)
         self.label_res.setAlignment(Qt.AlignCenter)
+        self.label_res.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.label_res.setStyleSheet(
+            f"background-color: {UITheme.COLOR_BACKGROUND};"
+            f"border: 2px dashed {UITheme.COLOR_BORDER};"
+            f"border-radius: {UITheme.CONTROL_RADIUS}px;"
+        )
 
-        hb = QHBoxLayout()
-        hb.addWidget(self.label_orig)
-        hb.addWidget(self.label_res)
-        self.content_layout.addLayout(hb)
+        image_row.addWidget(self.label_orig)
+        image_row.addWidget(self.label_res)
+        preview_layout.addLayout(image_row)
+        self.content_layout.addWidget(preview_card)
 
+        detail_card, detail_layout = create_section_card(
+            "检测详情",
+            "推理后的螺栓识别记录将以结构化文本方式输出。",
+        )
         self.text_detail = QTextEdit()
         self.text_detail.setReadOnly(True)
-        self.content_layout.addWidget(self.text_detail)
+        self.text_detail.setMinimumHeight(180)
+        self.text_detail.setStyleSheet(
+            f"border: 1px solid {UITheme.COLOR_BORDER};"
+            f"border-radius: {UITheme.CONTROL_RADIUS}px;"
+        )
+        detail_layout.addWidget(self.text_detail)
+        self.content_layout.addWidget(detail_card)
 
     def select_image(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -670,8 +1056,10 @@ class ImageInferencePage(FunctionPage):
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
                 sample_ann = Image.fromarray(ann_rgb)
                 w0, h0 = sample_orig.size
-                r = min(600 / w0, 400 / h0, 1.0)
-                w1, h1 = int(w0 * r), int(h0 * r)
+                target_w = max(self.label_orig.width(), self.label_orig.minimumWidth())
+                target_h = max(self.label_orig.height(), self.label_orig.minimumHeight())
+                r = min(target_w / w0, target_h / h0, 1.0)
+                w1, h1 = max(int(w0 * r), 1), max(int(h0 * r), 1)
                 self.label_orig.setPixmap(
                     pil_to_pixmap(sample_orig.resize((w1, h1), Image.Resampling.LANCZOS))
                 )
@@ -822,39 +1210,48 @@ class VideoInferencePage(FunctionPage):
         self.initUI()
 
     def initUI(self):
-        btn_sel = QPushButton("选择视频文件", clicked=self.select_video)
-        btn_sel.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
+        quick_card, quick_layout = create_section_card(
+            "加载视频",
+            "导入需要检测的监控视频，进度条将实时展示推理状态。",
         )
-        btn_sel.setFixedWidth(200)
-        self.content_layout.addWidget(btn_sel, alignment=Qt.AlignCenter)
 
-        self.info = QLabel("视频推理进度信息", alignment=Qt.AlignCenter)
-        self.content_layout.addWidget(self.info)
+        btn_sel = QPushButton("选择视频文件", clicked=self.select_video)
+        style_primary_button(btn_sel)
+        quick_layout.addWidget(btn_sel, alignment=Qt.AlignLeft)
+
+        self.info = QLabel("尚未选择视频")
+        self.info.setWordWrap(True)
+        self.info.setFont(UITheme.font())
+        quick_layout.addWidget(self.info)
 
         self.bar = QProgressBar()
-        self.bar.setFixedWidth(400)
         self.bar.setValue(0)
-        self.content_layout.addWidget(self.bar, alignment=Qt.AlignCenter)
+        self.bar.setTextVisible(True)
+        quick_layout.addWidget(self.bar)
 
-        self.label_vid = QLabel("视频画面", alignment=Qt.AlignCenter)
-        self.label_vid.setFixedSize(600, 400)
-        self.label_vid.setStyleSheet("border:3px dashed gray;")
-        self.content_layout.addWidget(self.label_vid, alignment=Qt.AlignCenter)
+        self.content_layout.addWidget(quick_card)
+
+        preview_card, preview_layout = create_section_card(
+            "推理预览",
+            "实时查看视频首帧与标注结果，便于核验推理效果。",
+        )
+        self.label_vid = QLabel("等待推理开始")
+        self.label_vid.setMinimumSize(400, 260)
+        self.label_vid.setAlignment(Qt.AlignCenter)
+        self.label_vid.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.label_vid.setStyleSheet(
+            f"background-color: {UITheme.COLOR_BACKGROUND};"
+            f"border: 2px dashed {UITheme.COLOR_BORDER};"
+            f"border-radius: {UITheme.CONTROL_RADIUS}px;"
+        )
+        preview_layout.addWidget(self.label_vid)
 
         self.btn_open = QPushButton("打开处理后视频", clicked=self.open_video)
-        self.btn_open.setFixedWidth(200)
-        self.btn_open.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
-        )
+        style_secondary_button(self.btn_open)
         self.btn_open.setEnabled(False)
-        self.content_layout.addWidget(self.btn_open, alignment=Qt.AlignCenter)
+        preview_layout.addWidget(self.btn_open, alignment=Qt.AlignLeft)
+
+        self.content_layout.addWidget(preview_card)
 
     def select_video(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -874,8 +1271,10 @@ class VideoInferencePage(FunctionPage):
         self.thread.start()
 
     def update_frame(self, qimg):
+        target_w = max(self.label_vid.width(), self.label_vid.minimumWidth())
+        target_h = max(self.label_vid.height(), self.label_vid.minimumHeight())
         pm = QPixmap.fromImage(qimg).scaled(
-            600, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.label_vid.setPixmap(pm)
 
@@ -1053,31 +1452,43 @@ class CameraPage(FunctionPage):
         self.initUI()
 
     def initUI(self):
-        hb = QHBoxLayout()
-        btn_font = (
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
+        control_card, control_layout = create_section_card(
+            "实时检测",
+            "连接摄像头以获取现场画面，可随时开始或停止推理。",
         )
+        button_row = QHBoxLayout()
+        button_row.setSpacing(UITheme.SECTION_SPACING)
 
         self.btn_start = QPushButton("开始检测", clicked=self.start_camera)
-        self.btn_start.setStyleSheet(btn_font)
-        self.btn_start.setFixedWidth(120)
+        style_primary_button(self.btn_start)
+        button_row.addWidget(self.btn_start)
 
         self.btn_stop = QPushButton("停止检测", clicked=self.stop_camera)
-        self.btn_stop.setStyleSheet(btn_font)
-        self.btn_stop.setFixedWidth(120)
+        style_secondary_button(self.btn_stop)
         self.btn_stop.setEnabled(False)
+        button_row.addWidget(self.btn_stop)
+        button_row.addStretch()
 
-        hb.addWidget(self.btn_start)
-        hb.addWidget(self.btn_stop)
-        self.content_layout.addLayout(hb)
+        control_layout.addLayout(button_row)
+        self.content_layout.addWidget(control_card)
 
-        self.label_cam = QLabel("摄像头画面", alignment=Qt.AlignCenter)
-        self.label_cam.setFixedSize(600, 400)
-        self.label_cam.setStyleSheet("border:3px dashed gray;")
-        self.content_layout.addWidget(self.label_cam, alignment=Qt.AlignCenter)
+        preview_card, preview_layout = create_section_card(
+            "摄像头预览",
+            "实时推理画面会在此展示，便于确认设备状态。",
+        )
+
+        self.label_cam = QLabel("摄像头画面")
+        self.label_cam.setAlignment(Qt.AlignCenter)
+        self.label_cam.setMinimumSize(400, 260)
+        self.label_cam.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.label_cam.setStyleSheet(
+            f"background-color: {UITheme.COLOR_BACKGROUND};"
+            f"border: 2px dashed {UITheme.COLOR_BORDER};"
+            f"border-radius: {UITheme.CONTROL_RADIUS}px;"
+        )
+        preview_layout.addWidget(self.label_cam)
+
+        self.content_layout.addWidget(preview_card)
 
     def start_camera(self):
         if self.thread:
@@ -1098,8 +1509,10 @@ class CameraPage(FunctionPage):
         self.btn_stop.setEnabled(False)
 
     def update_frame(self, qimg):
+        target_w = max(self.label_cam.width(), self.label_cam.minimumWidth())
+        target_h = max(self.label_cam.height(), self.label_cam.minimumHeight())
         pm = QPixmap.fromImage(qimg).scaled(
-            600, 400, Qt.KeepAspectRatio, Qt.SmoothTransformation
+            target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.label_cam.setPixmap(pm)
 
@@ -1120,68 +1533,83 @@ class SettingsPage(FunctionPage):
         self.initUI()
 
     def initUI(self):
-        group = QGroupBox("模型与推理设置")
-        vb = QVBoxLayout(group)
+        self.set_subtitle("集中管理模型推理参数与云端配置，保持多页面操作一致。")
 
-        btn_upload = QPushButton("MQTT云端上传设置", clicked=lambda: self.main_window.gotoPage(7))
-        self.content_layout.addWidget(btn_upload)  # 或合适的布局位置
-        btn_webdav_upload = QPushButton("WebDAV云端上传设置", clicked=lambda: self.main_window.gotoPage(8))
-        self.content_layout.addWidget(btn_webdav_upload)
-        btn_ota = QPushButton("OTA设置", clicked=lambda: self.main_window.gotoPage(9))
-        self.content_layout.addWidget(btn_ota)
+        shortcuts_card, shortcuts_layout = create_section_card(
+            "快捷入口",
+            "根据需要跳转到云端上传、WebDAV 与 OTA 等扩展配置。",
+        )
+        shortcut_row = QHBoxLayout()
+        shortcut_row.setSpacing(UITheme.SECTION_SPACING)
 
-        # 模型权重路径
-        h1 = QHBoxLayout()
-        lb = QLabel("模型权重：")
+        btn_upload = QPushButton("MQTT 云端上传设置", clicked=lambda: self.main_window.gotoPage(7))
+        style_secondary_button(btn_upload)
+        shortcut_row.addWidget(btn_upload)
+
+        btn_webdav_upload = QPushButton("WebDAV 上传设置", clicked=lambda: self.main_window.gotoPage(8))
+        style_secondary_button(btn_webdav_upload)
+        shortcut_row.addWidget(btn_webdav_upload)
+
+        btn_ota = QPushButton("OTA 设置", clicked=lambda: self.main_window.gotoPage(9))
+        style_secondary_button(btn_ota)
+        shortcut_row.addWidget(btn_ota)
+        shortcut_row.addStretch()
+
+        shortcuts_layout.addLayout(shortcut_row)
+        self.content_layout.addWidget(shortcuts_card)
+
+        model_card, model_layout = create_section_card(
+            "模型与推理参数",
+            "统一管理推理所需的权重文件、置信度阈值及结果保存目录。",
+        )
+
         self.ed_weights = QLineEdit(self.main_window.model_weight_path)
         self.ed_weights.setReadOnly(True)
+        style_input(self.ed_weights)
         btn_sel = QPushButton("选择...", clicked=self.select_weight)
-        btn_sel.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:1px solid white;"
-            "border-radius:3px;"
-        )
-        h1.addWidget(lb)
-        h1.addWidget(self.ed_weights)
-        h1.addWidget(btn_sel)
-        vb.addLayout(h1)
+        style_secondary_button(btn_sel)
+        weight_row = QHBoxLayout()
+        weight_row.setSpacing(UITheme.SECTION_SPACING // 2)
+        weight_row.addWidget(self.ed_weights)
+        weight_row.addWidget(btn_sel)
+        model_layout.addLayout(weight_row)
 
-        # 置信度阈值
-        h2 = QHBoxLayout()
+        slider_row = QHBoxLayout()
+        slider_row.setSpacing(UITheme.SECTION_SPACING)
         lb2 = QLabel("置信度阈值：")
+        lb2.setFont(UITheme.font())
         self.sld_conf = QSlider(Qt.Horizontal)
         self.sld_conf.setRange(0, 100)
         self.sld_conf.setValue(int(self.main_window.conf_thres * 100))
         self.sld_conf.valueChanged.connect(self.on_conf_change)
         self.lb_val = QLabel(f"{self.main_window.conf_thres:.2f}")
-        h2.addWidget(lb2)
-        h2.addWidget(self.sld_conf)
-        h2.addWidget(self.lb_val)
-        vb.addLayout(h2)
+        slider_row.addWidget(lb2)
+        slider_row.addWidget(self.sld_conf)
+        slider_row.addWidget(self.lb_val)
+        model_layout.addLayout(slider_row)
 
-        # 添加保存目录选择
-        h3 = QHBoxLayout()
-        lb3 = QLabel("保存目录：")
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(UITheme.SECTION_SPACING // 2)
         self.ed_dir = QLineEdit(self.main_window.save_root_dir)
         self.ed_dir.setReadOnly(True)
-        btn_sel_dir = QPushButton("选择...", clicked=self.select_save_dir)
-        h3.addWidget(lb3)
-        h3.addWidget(self.ed_dir)
-        h3.addWidget(btn_sel_dir)
-        vb.addLayout(h3)
-
-        self.content_layout.addWidget(group)
+        style_input(self.ed_dir)
+        btn_sel_dir = QPushButton("选择保存目录", clicked=self.select_save_dir)
+        style_secondary_button(btn_sel_dir)
+        dir_row.addWidget(self.ed_dir)
+        dir_row.addWidget(btn_sel_dir)
+        model_layout.addLayout(dir_row)
 
         help_txt = (
-            "使用说明：\n"
-            "1. 此处调整置信度阈值后，图片/视频/摄像头检测都用新阈值；\n"
-            "2. 若检测进行中，请停止后再开始才能生效；\n"
-            "3. 可切换YOLO权重文件，系统会自动加载。"
+            "• 调整置信度阈值后，新任务会自动生效；\n"
+            "• 更换模型权重后系统将自动重新加载；\n"
+            "• 保存目录用于统一归档所有检测批次。"
         )
         lb_help = QLabel(help_txt)
         lb_help.setWordWrap(True)
-        self.content_layout.addWidget(lb_help)
+        lb_help.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+        model_layout.addWidget(lb_help)
+
+        self.content_layout.addWidget(model_card)
 
     def select_weight(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -1217,72 +1645,67 @@ class VisionHomePage(QWidget):
         self.initUI()
 
     def initUI(self):
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().setSpacing(0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.bg_label = QLabel(self)
         self.bg_label.setAlignment(Qt.AlignCenter)
-        self.layout().addWidget(self.bg_label)
+        layout.addWidget(self.bg_label)
 
         self.overlay = QWidget(self.bg_label)
-        self.overlay.setStyleSheet("background-color: rgba(0,0,0,0);")
-        vbox = QVBoxLayout(self.overlay)
-        vbox.setAlignment(Qt.AlignCenter)
-        vbox.setSpacing(30)
+        self.overlay.setObjectName("VisionOverlay")
+        self.overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.58);")
+        overlay_layout = QVBoxLayout(self.overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setSpacing(0)
+
+        hero = QWidget(self.overlay)
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(80, 120, 80, 80)
+        hero_layout.setSpacing(UITheme.SECTION_SPACING * 2)
+        hero_layout.setAlignment(Qt.AlignHCenter)
 
         title = QLabel("视觉监测功能")
-        title.setFont(QFont("Microsoft YaHei", 36, QFont.Bold))
-        title.setStyleSheet("color:#ffffff;")
+        title.setFont(QFont(UITheme.FONT_FAMILY, 38, QFont.Bold))
+        title.setStyleSheet("color:#FFFFFF;")
         title.setAlignment(Qt.AlignCenter)
-        vbox.addWidget(title)
+        hero_layout.addWidget(title)
+
+        subtitle = QLabel("根据不同采集方式启动推理任务，查看检测结果与归档记录。")
+        subtitle.setFont(UITheme.subtitle_font())
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet("color: rgba(255,255,255,0.82);")
+        subtitle.setWordWrap(True)
+        hero_layout.addWidget(subtitle)
 
         card_area = QWidget()
         grid = QGridLayout(card_area)
-        grid.setSpacing(60)
-        grid.setContentsMargins(60,30,60,50)
+        grid.setSpacing(UITheme.SECTION_SPACING * 2)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
-        card_style = """
-            QFrame {
-                background: rgba(0,0,0,0.6);
-                border: none;
-                border-radius:15px;
-            }
-            QFrame:hover {
-                background: rgba(0,0,0,0.8);
-            }
-        """
-        names = ["图片推理", "视频推理", "摄像头检测", "设置与帮助"]
-        for i, name in enumerate(names):
-            card = QFrame()
-            card.setFixedSize(300,160)
-            card.setStyleSheet(card_style)
-            lab = QLabel(name, card)
-            lab.setStyleSheet(
-                "border:none;"
-                "font-size:28px;"
-                "font-weight:bold;"
-                "color:#ffffff;"
-            )
-            lab.setAlignment(Qt.AlignCenter)
-            vb2 = QVBoxLayout(card)
-            vb2.addWidget(lab, alignment=Qt.AlignCenter)
-            card.mousePressEvent = lambda e, idx=i: self.gotoFunc(idx)
-            grid.addWidget(card, i//2, i%2, alignment=Qt.AlignCenter)
+        cards = [
+            ("图片推理", "单次或批量选择图片，完成检测并输出报告。", 2),
+            ("视频推理", "导入视频并跟踪检测进度，自动生成关键帧与结果。", 3),
+            ("摄像头检测", "启动实时摄像头并查看现场识别反馈。", 4),
+            ("设置与帮助", "调整推理参数与说明文档，保持模型配置一致。", 5),
+        ]
+        for i, (title_text, desc, page_idx) in enumerate(cards):
+            card = create_navigation_card(title_text, desc)
+            card.setMinimumSize(260, 170)
+            card.mousePressEvent = lambda e, idx=page_idx: self.mw.gotoPage(idx)
+            grid.addWidget(card, i // 2, i % 2)
 
-        vbox.addWidget(card_area, alignment=Qt.AlignCenter)
-        vbox.addStretch()
+        hero_layout.addWidget(card_area)
 
-        btn_back = QPushButton("返回首页")
-        btn_back.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
-        )
-        btn_back.setFixedWidth(120)
-        btn_back.clicked.connect(lambda: self.mw.gotoPage(0))
-        vbox.addWidget(btn_back, alignment=Qt.AlignLeft|Qt.AlignBottom)
+        back_button = QPushButton("返回首页", clicked=lambda: self.mw.gotoPage(0))
+        style_secondary_button(back_button)
+        back_button.setMinimumWidth(160)
+        hero_layout.addWidget(back_button, alignment=Qt.AlignCenter)
+
+        overlay_layout.addWidget(hero)
+        overlay_layout.addStretch()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1311,64 +1734,69 @@ class VisionHomePage(QWidget):
 ###############################################################################
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT as NavigationToolbar
 
-class VibrationPage(QWidget):
+class VibrationPage(FunctionPage):
     def __init__(self, mw, parent=None):
-        super().__init__(parent)
-        self.mw = mw
+        super().__init__(mw, "振动监测", parent)
         self.raw_time = None
-        self.raw_acc  = None
+        self.raw_acc = None
+        self.initUI()
 
-        layout = QVBoxLayout(self)
-        btn_font = (
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
-            "font-size:16px;"
-            "padding:5px;"
+    def initUI(self):
+        self.set_subtitle("导入振动监测数据，快速生成波形与频谱分析图。")
+
+        action_card, action_layout = create_section_card(
+            "数据操作",
+            "选择 Excel 数据文件后，可在下方切换查看原始波形或频谱分析。",
         )
 
-        hb = QHBoxLayout()
-        self.btn_load = QPushButton("读取 Excel", clicked=self.load_excel)
-        self.btn_load.setStyleSheet(btn_font)
-        self.btn_plot = QPushButton("原始波形", clicked=self.plot_raw)
-        self.btn_plot.setStyleSheet(btn_font)
-        self.btn_fft = QPushButton("频谱分析", clicked=self.plot_fft)
-        self.btn_fft.setStyleSheet(btn_font)
-        # 平滑功能移除，不添加 self.btn_smooth
-        hb.addWidget(self.btn_load)
-        hb.addWidget(self.btn_plot)
-        hb.addWidget(self.btn_fft)
-        layout.addLayout(hb)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(UITheme.SECTION_SPACING)
 
-        # 图表区域 (Matplotlib 嵌入)
+        self.btn_load = QPushButton("读取 Excel", clicked=self.load_excel)
+        style_primary_button(self.btn_load)
+        button_row.addWidget(self.btn_load)
+
+        self.btn_plot = QPushButton("原始波形", clicked=self.plot_raw)
+        style_secondary_button(self.btn_plot)
+        button_row.addWidget(self.btn_plot)
+
+        self.btn_fft = QPushButton("频谱分析", clicked=self.plot_fft)
+        style_secondary_button(self.btn_fft)
+        button_row.addWidget(self.btn_fft)
+        button_row.addStretch()
+        action_layout.addLayout(button_row)
+
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(UITheme.SECTION_SPACING)
+        stats_row.addWidget(QLabel("样本数："))
+        self.lb_samples = QLabel("--")
+        stats_row.addWidget(self.lb_samples)
+        stats_row.addWidget(QLabel("最大加速度："))
+        self.lb_max = QLabel("--")
+        stats_row.addWidget(self.lb_max)
+        stats_row.addWidget(QLabel("最小加速度："))
+        self.lb_min = QLabel("--")
+        stats_row.addWidget(self.lb_min)
+        stats_row.addStretch()
+        action_layout.addLayout(stats_row)
+
+        self.content_layout.addWidget(action_card)
+
+        chart_card, chart_layout = create_section_card(
+            "图表展示",
+            "使用工具栏可对图表进行缩放、拖拽，便于定位异常点。",
+        )
+
         self.fig = plt.Figure(figsize=(7, 4), dpi=100)
         self.canvas = FigureCanvas(self.fig)
-        self.ax = self.fig.add_subplot(1,1,1)
-        # 添加导航工具栏以支持缩放平移等交互
+        self.canvas.setMinimumHeight(320)
+        self.ax = self.fig.add_subplot(1, 1, 1)
         self.toolbar = NavigationToolbar(self.canvas, self)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
 
-        # 数据统计信息
-        info_hb = QHBoxLayout()
-        info_hb.addWidget(QLabel("样本数:"))
-        self.lb_samples = QLabel("--")
-        info_hb.addWidget(self.lb_samples)
-        info_hb.addWidget(QLabel("最大加速度:"))
-        self.lb_max = QLabel("--")
-        info_hb.addWidget(self.lb_max)
-        info_hb.addWidget(QLabel("最小加速度:"))
-        self.lb_min = QLabel("--")
-        info_hb.addWidget(self.lb_min)
-        layout.addLayout(info_hb)
+        chart_layout.addWidget(self.toolbar)
+        chart_layout.addWidget(self.canvas)
 
-        btn_back = QPushButton("返回首页", clicked=lambda: self.mw.gotoPage(0))
-        btn_back.setStyleSheet(btn_font)
-        btn_back.setFixedWidth(120)
-        layout.addWidget(btn_back, alignment=Qt.AlignLeft)
-
-        self.setLayout(layout)
+        self.content_layout.addWidget(chart_card)
 
     def load_excel(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -1427,6 +1855,9 @@ class VibrationPage(QWidget):
         self.fig.tight_layout()
         self.canvas.draw()
 
+    def on_back(self):
+        self.main_window.gotoPage(0)
+
 ###############################################################################
 #   7) 上传模块
 ###############################################################################
@@ -1472,44 +1903,55 @@ class UploadSettingsPage(FunctionPage):
         self.initUI()
 
     def initUI(self):
-        layout = QVBoxLayout()
+        self.set_subtitle("配置 MQTT 云端服务器并决定检测结果的自动上传策略。")
 
-        # MQTT参数输入区
+        form_card, form_layout = create_section_card(
+            "服务器连接",
+            "填写 MQTT 服务器地址、认证信息及主题，确保上传链路畅通。",
+        )
+
         self.ed_host = QLineEdit()
-        self.ed_host.setPlaceholderText("MQTT服务器地址")
+        self.ed_host.setPlaceholderText("例如：mqtt.example.com")
+        style_input(self.ed_host)
+        add_form_row(form_layout, "服务器地址", self.ed_host)
+
         self.ed_port = QLineEdit()
-        self.ed_port.setPlaceholderText("端口号(默认1883)")
+        self.ed_port.setPlaceholderText("默认 1883")
+        style_input(self.ed_port)
+        add_form_row(form_layout, "端口号", self.ed_port)
+
         self.ed_user = QLineEdit()
-        self.ed_user.setPlaceholderText("用户名(可选)")
+        self.ed_user.setPlaceholderText("用户名 (可选)")
+        style_input(self.ed_user)
+        add_form_row(form_layout, "用户名", self.ed_user)
+
         self.ed_pass = QLineEdit()
-        self.ed_pass.setPlaceholderText("密码(可选)")
+        self.ed_pass.setPlaceholderText("密码 (可选)")
         self.ed_pass.setEchoMode(QLineEdit.Password)
-        self.ed_topic = QLineEdit()
-        self.ed_topic.setPlaceholderText("上传主题(Topic)")
-        self.ed_topic.setText("bolt/upload")
+        style_input(self.ed_pass)
+        add_form_row(form_layout, "密码", self.ed_pass)
 
-        layout.addWidget(QLabel("服务器地址:"))
-        layout.addWidget(self.ed_host)
-        layout.addWidget(QLabel("端口号:"))
-        layout.addWidget(self.ed_port)
-        layout.addWidget(QLabel("用户名:"))
-        layout.addWidget(self.ed_user)
-        layout.addWidget(QLabel("密码:"))
-        layout.addWidget(self.ed_pass)
-        layout.addWidget(QLabel("主题(Topic):"))
-        layout.addWidget(self.ed_topic)
+        self.ed_topic = QLineEdit("bolt/upload")
+        style_input(self.ed_topic)
+        add_form_row(form_layout, "主题 Topic", self.ed_topic)
 
-        # 上传模式切换
+        self.content_layout.addWidget(form_card)
+
+        mode_card, mode_layout = create_section_card(
+            "上传策略",
+            "选择自动或手动上传。自动模式将在推理完成后立即推送数据。",
+        )
+
         self.btn_mode = QPushButton("当前为手动上传，点击切换为自动上传", clicked=self.toggle_mode)
-        layout.addWidget(self.btn_mode)
+        style_secondary_button(self.btn_mode)
+        mode_layout.addWidget(self.btn_mode)
 
-        # 立即上传按钮（仅手动模式可用）
         self.btn_upload = QPushButton("立即上传最新批次", clicked=self.upload_latest_batch)
-        layout.addWidget(self.btn_upload)
+        style_primary_button(self.btn_upload)
+        mode_layout.addWidget(self.btn_upload)
 
-        self.content_layout.addLayout(layout)
+        self.content_layout.addWidget(mode_card)
 
-        # 让UI与全局参数保持同步
         self.sync_from_global()
 
     def sync_from_global(self):
@@ -1792,38 +2234,49 @@ class WebDAVUploadSettingsPage(FunctionPage):
         self.initUI()
 
     def initUI(self):
-        layout = QVBoxLayout()
+        self.set_subtitle("通过 WebDAV 将检测批次上传到企业网盘或私有云。")
 
-        # WebDAV参数输入区
+        form_card, form_layout = create_section_card(
+            "服务器连接",
+            "填写 WebDAV 地址与账号信息，支持 HTTPS 与分块续传。",
+        )
+
         self.ed_host = QLineEdit()
-        self.ed_host.setPlaceholderText("WebDAV服务器地址（含http/https）")
+        self.ed_host.setPlaceholderText("例如：https://nextcloud.example.com")
+        style_input(self.ed_host)
+        add_form_row(form_layout, "服务器地址", self.ed_host)
+
         self.ed_user = QLineEdit()
-        self.ed_user.setPlaceholderText("用户名(可选)")
+        self.ed_user.setPlaceholderText("用户名 (可选)")
+        style_input(self.ed_user)
+        add_form_row(form_layout, "用户名", self.ed_user)
+
         self.ed_pass = QLineEdit()
-        self.ed_pass.setPlaceholderText("密码(可选)")
+        self.ed_pass.setPlaceholderText("密码 (可选)")
         self.ed_pass.setEchoMode(QLineEdit.Password)
-        self.ed_remotepath = QLineEdit()
-        self.ed_remotepath.setPlaceholderText("远程文件夹(如/bolt_upload/)")
-        self.ed_remotepath.setText("/bolt_upload/")
+        style_input(self.ed_pass)
+        add_form_row(form_layout, "密码", self.ed_pass)
 
-        layout.addWidget(QLabel("WebDAV服务器地址:"))
-        layout.addWidget(self.ed_host)
-        layout.addWidget(QLabel("用户名:"))
-        layout.addWidget(self.ed_user)
-        layout.addWidget(QLabel("密码:"))
-        layout.addWidget(self.ed_pass)
-        layout.addWidget(QLabel("远程文件夹路径:"))
-        layout.addWidget(self.ed_remotepath)
+        self.ed_remotepath = QLineEdit("/bolt_upload/")
+        style_input(self.ed_remotepath)
+        add_form_row(form_layout, "远程目录", self.ed_remotepath)
 
-        # 上传模式切换
+        self.content_layout.addWidget(form_card)
+
+        mode_card, mode_layout = create_section_card(
+            "上传策略",
+            "自动模式会在推理完成后立即同步到 WebDAV。",
+        )
+
         self.btn_mode = QPushButton("当前为手动上传，点击切换为自动上传", clicked=self.toggle_mode)
-        layout.addWidget(self.btn_mode)
+        style_secondary_button(self.btn_mode)
+        mode_layout.addWidget(self.btn_mode)
 
-        # 立即上传按钮（仅手动模式可用）
         self.btn_upload = QPushButton("立即上传最新批次", clicked=self.upload_latest_batch)
-        layout.addWidget(self.btn_upload)
+        style_primary_button(self.btn_upload)
+        mode_layout.addWidget(self.btn_upload)
 
-        self.content_layout.addLayout(layout)
+        self.content_layout.addWidget(mode_card)
         self.sync_from_global()
 
     def sync_from_global(self):
@@ -1934,13 +2387,27 @@ class OTASettingsPage(FunctionPage):
         self.initUI()
 
     def initUI(self):
+        self.set_subtitle("检查并下载最新模型权重，保持推理能力一致。")
+
+        card, layout = create_section_card(
+            "OTA 配置",
+            "填写 manifest 地址后即可检查更新，系统会自动拉取模型文件。",
+        )
+
         self.ed_manifest = QLineEdit(self.main_window.ota_manifest_url)
-        self.ed_manifest.setPlaceholderText("OTA 服务器 URL（manifest）")
-        self.content_layout.addWidget(QLabel("OTA 服务器 URL（manifest）:"))
-        self.content_layout.addWidget(self.ed_manifest)
+        self.ed_manifest.setPlaceholderText("例如：https://example.com/ota/manifest.json")
+        style_input(self.ed_manifest)
+        layout.addWidget(self.ed_manifest)
+
+        self.status_label = QLabel("尚未检查更新")
+        self.status_label.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+        layout.addWidget(self.status_label)
 
         btn_check = QPushButton("检查更新", clicked=self.check_update)
-        self.content_layout.addWidget(btn_check)
+        style_primary_button(btn_check)
+        layout.addWidget(btn_check, alignment=Qt.AlignLeft)
+
+        self.content_layout.addWidget(card)
 
     def on_back(self):
         self.main_window.gotoPage(5)
@@ -1951,21 +2418,25 @@ class OTASettingsPage(FunctionPage):
             QMessageBox.warning(self, "提示", "请先填写 OTA manifest URL")
             return
         self.main_window.ota_manifest_url = url
+        self.status_label.setText("正在检查更新...")
         try:
             r = requests.get(url, timeout=10)
             r.raise_for_status()
             manifest = r.json()
         except Exception as e:
             QMessageBox.warning(self, "错误", f"获取manifest失败: {e}")
+            self.status_label.setText("检查失败，请确认地址后重试。")
             return
 
         remote_ver = manifest.get('version', '')
         model_path = manifest.get('model', '')
         if not model_path:
             QMessageBox.warning(self, "错误", "manifest缺少model字段")
+            self.status_label.setText("manifest 缺少 model 字段。")
             return
         if remote_ver == self.main_window.model_version:
             QMessageBox.information(self, "提示", "已是最新")
+            self.status_label.setText("当前模型已是最新版本。")
             return
 
         model_url = urljoin(url, model_path)
@@ -2001,18 +2472,21 @@ class OTASettingsPage(FunctionPage):
                 self.main_window.model_version = remote_ver
                 self.main_window.reload_model()
                 QMessageBox.information(self, "成功", "已更新")
+                self.status_label.setText(f"模型已更新到版本 {remote_ver}")
             except Exception as e:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
                 if os.path.exists(bak):
                     shutil.copy2(bak, dest)
                 QMessageBox.warning(self, "失败", f"更新失败并已回滚: {e}")
+                self.status_label.setText("更新失败，已尝试回滚。")
         else:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             if os.path.exists(bak) and not os.path.exists(dest):
                 shutil.copy2(bak, dest)
             QMessageBox.warning(self, "失败", f"更新失败: {msg}")
+            self.status_label.setText("下载失败，请稍后重试。")
 
 ###############################################################################
 #   总首页 & 主窗口
@@ -2024,65 +2498,76 @@ class MainHomePage(QWidget):
         self.initUI()
 
     def initUI(self):
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0,0,0,0)
-        self.layout().setSpacing(0)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
         self.bg_label = QLabel(self)
         self.bg_label.setAlignment(Qt.AlignCenter)
-        self.layout().addWidget(self.bg_label)
+        root_layout.addWidget(self.bg_label)
 
         self.overlay = QWidget(self.bg_label)
-        self.overlay.setStyleSheet("background-color: rgba(0,0,0,0);")
-        vbox = QVBoxLayout(self.overlay)
-        vbox.setAlignment(Qt.AlignCenter)
-        vbox.setSpacing(30)
+        self.overlay.setObjectName("MainHomeOverlay")
+        self.overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.58);")
+        overlay_layout = QVBoxLayout(self.overlay)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+        overlay_layout.setSpacing(0)
+
+        hero = QWidget(self.overlay)
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(80, 120, 80, 80)
+        hero_layout.setSpacing(UITheme.SECTION_SPACING * 2)
+        hero_layout.setAlignment(Qt.AlignHCenter)
 
         title = QLabel("岸桥轨道螺栓松动监测系统")
-        title.setFont(QFont("Microsoft YaHei", 48, QFont.Bold))
-        title.setStyleSheet("color:#ffffff;")
+        title.setFont(QFont(UITheme.FONT_FAMILY, 44, QFont.Bold))
+        title.setStyleSheet("color: #FFFFFF;")
         title.setAlignment(Qt.AlignCenter)
-        vbox.addWidget(title)
+        hero_layout.addWidget(title)
+
+        subtitle = QLabel("统一的视觉与振动监测平台，为运维团队提供高效稳定的安全巡检能力。")
+        subtitle.setFont(UITheme.subtitle_font())
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet("color: rgba(255,255,255,0.82);")
+        subtitle.setWordWrap(True)
+        hero_layout.addWidget(subtitle)
 
         card_area = QWidget()
         grid = QGridLayout(card_area)
-        grid.setSpacing(60)
-        grid.setContentsMargins(60,30,60,50)
+        grid.setSpacing(UITheme.SECTION_SPACING * 2)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
 
-        card_style = """
-            QFrame {
-                background: rgba(0,0,0,0.6);
-                border: none;
-                border-radius:15px;
-            }
-            QFrame:hover {
-                background: rgba(0,0,0,0.8);
-            }
-        """
-        card_vis = QFrame()
-        card_vis.setFixedSize(300,160)
-        card_vis.setStyleSheet(card_style)
-        lab_vis = QLabel("视觉监测", card_vis)
-        lab_vis.setStyleSheet("border:none; font-size:28px; font-weight:bold; color:#ffffff;")
-        lab_vis.setAlignment(Qt.AlignCenter)
-        lay_vis = QVBoxLayout(card_vis)
-        lay_vis.addWidget(lab_vis, alignment=Qt.AlignCenter)
-        card_vis.mousePressEvent = lambda e: self.mw.gotoPage(1)
+        vision_card = create_navigation_card(
+            "视觉监测",
+            "查看图片、视频或实时摄像头的检测结果，集中管理推理流程。",
+        )
+        vision_card.setMinimumSize(280, 180)
+        vision_card.mousePressEvent = lambda e: self.mw.gotoPage(1)
 
-        card_vib = QFrame()
-        card_vib.setFixedSize(300,160)
-        card_vib.setStyleSheet(card_style)
-        lab_vib = QLabel("振动监测", card_vib)
-        lab_vib.setStyleSheet("border:none; font-size:28px; font-weight:bold; color:#ffffff;")
-        lab_vib.setAlignment(Qt.AlignCenter)
-        lay_vib = QVBoxLayout(card_vib)
-        lay_vib.addWidget(lab_vib, alignment=Qt.AlignCenter)
-        card_vib.mousePressEvent = lambda e: self.mw.gotoPage(6)
+        vibration_card = create_navigation_card(
+            "振动监测",
+            "导入振动数据并快速进行波形与频谱分析。",
+        )
+        vibration_card.setMinimumSize(280, 180)
+        vibration_card.mousePressEvent = lambda e: self.mw.gotoPage(6)
 
-        grid.addWidget(card_vis, 0,0, alignment=Qt.AlignCenter)
-        grid.addWidget(card_vib, 0,1, alignment=Qt.AlignCenter)
+        settings_card = create_navigation_card(
+            "系统设置",
+            "配置上传、OTA 以及模型推理参数，保持平台统一。",
+        )
+        settings_card.setMinimumSize(280, 180)
+        settings_card.mousePressEvent = lambda e: self.mw.gotoPage(5)
 
-        vbox.addWidget(card_area, alignment=Qt.AlignCenter)
+        grid.addWidget(vision_card, 0, 0)
+        grid.addWidget(vibration_card, 0, 1)
+        grid.addWidget(settings_card, 0, 2)
+
+        hero_layout.addWidget(card_area)
+        hero_layout.addStretch()
+
+        overlay_layout.addWidget(hero)
+        overlay_layout.addStretch()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
