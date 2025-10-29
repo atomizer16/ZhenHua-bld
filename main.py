@@ -92,6 +92,180 @@ import cv2
 from ultralytics import YOLO
 from PIL import Image
 
+
+###############################################################################
+#   统一的界面视觉与交互规范
+###############################################################################
+class UITheme:
+    """集中管理界面配色、字体与空间规范。"""
+
+    FONT_FAMILY = "Microsoft YaHei"
+    FONT_SIZE_BASE = 12
+    FONT_SIZE_SUBTITLE = 14
+    FONT_SIZE_TITLE = 18
+
+    COLOR_BACKGROUND = "#F3F6FC"
+    COLOR_SURFACE = "#FFFFFF"
+    COLOR_PRIMARY = "#2563EB"
+    COLOR_PRIMARY_HOVER = "#1D4ED8"
+    COLOR_PRIMARY_PRESSED = "#1E40AF"
+    COLOR_SECONDARY = "#E8EEF9"
+    COLOR_SECONDARY_TEXT = "#1F2937"
+    COLOR_TEXT_MUTED = "#6B7280"
+    COLOR_BORDER = "#D6E0F5"
+
+    COLOR_SUCCESS = "#2E8540"
+    COLOR_WARNING = "#F59E0B"
+    COLOR_DANGER = "#DC2626"
+
+    CONTROL_HEIGHT = 40
+    CONTROL_RADIUS = 10
+    SECTION_SPACING = 16
+
+    @staticmethod
+    def font(size=None, weight=QFont.Normal):
+        font = QFont(UITheme.FONT_FAMILY, size or UITheme.FONT_SIZE_BASE)
+        font.setWeight(weight)
+        return font
+
+    @staticmethod
+    def title_font():
+        font = QFont(UITheme.FONT_FAMILY, UITheme.FONT_SIZE_TITLE, QFont.Bold)
+        return font
+
+    @staticmethod
+    def subtitle_font(weight=QFont.Medium):
+        font = QFont(UITheme.FONT_FAMILY, UITheme.FONT_SIZE_SUBTITLE, weight)
+        return font
+
+
+def style_primary_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    button.setFont(UITheme.subtitle_font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: {UITheme.COLOR_PRIMARY};
+            color: #FFFFFF;
+            border: none;
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+        }}
+        QPushButton:hover {{
+            background-color: {UITheme.COLOR_PRIMARY_HOVER};
+        }}
+        QPushButton:pressed {{
+            background-color: {UITheme.COLOR_PRIMARY_PRESSED};
+        }}
+        QPushButton:disabled {{
+            background-color: {UITheme.COLOR_SECONDARY};
+            color: {UITheme.COLOR_TEXT_MUTED};
+        }}
+        """
+    )
+
+
+def style_secondary_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    button.setFont(UITheme.subtitle_font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: {UITheme.COLOR_SURFACE};
+            color: {UITheme.COLOR_SECONDARY_TEXT};
+            border: 1px solid {UITheme.COLOR_BORDER};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+        }}
+        QPushButton:hover {{
+            background-color: {UITheme.COLOR_SECONDARY};
+        }}
+        QPushButton:pressed {{
+            background-color: {UITheme.COLOR_BORDER};
+        }}
+        QPushButton:disabled {{
+            color: {UITheme.COLOR_TEXT_MUTED};
+            background-color: {UITheme.COLOR_BACKGROUND};
+        }}
+        """
+    )
+
+
+def style_text_button(button: QPushButton):
+    button.setCursor(Qt.PointingHandCursor)
+    button.setFlat(True)
+    button.setFont(UITheme.font())
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            background-color: transparent;
+            color: {UITheme.COLOR_PRIMARY};
+            border: none;
+            padding: 4px {UITheme.SECTION_SPACING // 2}px;
+            text-decoration: underline;
+        }}
+        QPushButton:hover {{
+            color: {UITheme.COLOR_PRIMARY_HOVER};
+        }}
+        QPushButton:pressed {{
+            color: {UITheme.COLOR_PRIMARY_PRESSED};
+        }}
+        """
+    )
+
+
+def style_input(widget: QLineEdit):
+    widget.setMinimumHeight(UITheme.CONTROL_HEIGHT)
+    widget.setFont(UITheme.font())
+    widget.setStyleSheet(
+        f"""
+        QLineEdit {{
+            border: 1px solid {UITheme.COLOR_BORDER};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            padding: 0 {UITheme.SECTION_SPACING}px;
+            background-color: {UITheme.COLOR_SURFACE};
+        }}
+        QLineEdit:focus {{
+            border: 2px solid {UITheme.COLOR_PRIMARY};
+        }}
+        QLineEdit:disabled {{
+            background-color: {UITheme.COLOR_SECONDARY};
+            color: {UITheme.COLOR_TEXT_MUTED};
+        }}
+        """
+    )
+
+
+def apply_dialog_frame(dialog: QDialog):
+    dialog.setStyleSheet(
+        f"""
+        QDialog {{
+            background-color: {UITheme.COLOR_SURFACE};
+        }}
+        QLabel {{
+            font-family: {UITheme.FONT_FAMILY};
+            color: {UITheme.COLOR_SECONDARY_TEXT};
+        }}
+        """
+    )
+
+
+def create_card_frame(parent=None):
+    frame = QFrame(parent)
+    frame.setObjectName("CardFrame")
+    frame.setStyleSheet(
+        f"""
+        QFrame#CardFrame {{
+            background-color: {UITheme.COLOR_SURFACE};
+            border-radius: {UITheme.CONTROL_RADIUS}px;
+            border: 1px solid {UITheme.COLOR_BORDER};
+        }}
+        """
+    )
+    return frame
+
 ###############################################################################
 #   登录/注册/修改密码 模块
 ###############################################################################
@@ -99,24 +273,37 @@ class RegisterDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("注册")
-        self.setFixedSize(300, 200)
+        self.setFixedSize(360, 280)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("创建新账户")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         # 密码输入
         self.edit_pass = QLineEdit()
         self.edit_pass.setPlaceholderText("密码")
         self.edit_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass)
         layout.addWidget(self.edit_pass)
         # 确认密码
         self.edit_pass2 = QLineEdit()
         self.edit_pass2.setPlaceholderText("确认密码")
         self.edit_pass2.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass2)
         layout.addWidget(self.edit_pass2)
         # 注册按钮
         btn_register = QPushButton("确认注册", clicked=self.do_register)
+        style_primary_button(btn_register)
         layout.addWidget(btn_register)
 
     def do_register(self):
@@ -149,29 +336,43 @@ class ChangePasswordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("修改密码")
-        self.setFixedSize(300, 200)
+        self.setFixedSize(360, 320)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("更新账户密码")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         # 旧密码输入
         self.edit_old_pass = QLineEdit()
         self.edit_old_pass.setPlaceholderText("当前密码")
         self.edit_old_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_old_pass)
         layout.addWidget(self.edit_old_pass)
         # 新密码输入
         self.edit_new_pass = QLineEdit()
         self.edit_new_pass.setPlaceholderText("新密码")
         self.edit_new_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_new_pass)
         layout.addWidget(self.edit_new_pass)
         # 确认新密码
         self.edit_new_pass2 = QLineEdit()
         self.edit_new_pass2.setPlaceholderText("确认新密码")
         self.edit_new_pass2.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_new_pass2)
         layout.addWidget(self.edit_new_pass2)
         # 确认修改按钮
         btn_change = QPushButton("确认修改", clicked=self.do_change)
+        style_primary_button(btn_change)
         layout.addWidget(btn_change)
 
     def do_change(self):
@@ -208,27 +409,53 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("用户登录")
-        self.setFixedSize(300, 180)
+        self.setFixedSize(500, 300)
+        apply_dialog_frame(self)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2,
+                                  UITheme.SECTION_SPACING * 3 // 2)
+        layout.setSpacing(UITheme.SECTION_SPACING)
+        title = QLabel("欢迎回来")
+        title.setFont(UITheme.title_font())
+        layout.addWidget(title, alignment=Qt.AlignLeft)
         # 用户名和密码输入
         self.edit_user = QLineEdit()
         self.edit_user.setPlaceholderText("用户名")
+        style_input(self.edit_user)
         layout.addWidget(self.edit_user)
         self.edit_pass = QLineEdit()
         self.edit_pass.setPlaceholderText("密码")
         self.edit_pass.setEchoMode(QLineEdit.Password)
+        style_input(self.edit_pass)
         layout.addWidget(self.edit_pass)
         # 按钮布局
-        btn_layout = QHBoxLayout()
         btn_login = QPushButton("登录", clicked=self.do_login)
-        btn_register = QPushButton("注册", clicked=self.open_register)
-        btn_change = QPushButton("修改密码", clicked=self.open_change)
         btn_cancel = QPushButton("取消", clicked=self.reject)
-        btn_layout.addWidget(btn_login)
-        btn_layout.addWidget(btn_register)
-        btn_layout.addWidget(btn_change)
-        btn_layout.addWidget(btn_cancel)
-        layout.addLayout(btn_layout)
+        btn_register = QPushButton("注册新用户", clicked=self.open_register)
+        btn_change = QPushButton("修改密码", clicked=self.open_change)
+        style_primary_button(btn_login)
+        style_secondary_button(btn_cancel)
+        style_text_button(btn_register)
+        style_text_button(btn_change)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(UITheme.SECTION_SPACING)
+        actions_row.addWidget(btn_login)
+        actions_row.addWidget(btn_cancel)
+        actions_row.addStretch(1)
+
+        links_row = QHBoxLayout()
+        links_row.setSpacing(UITheme.SECTION_SPACING // 2)
+        btn_register.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        btn_change.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        links_row.addWidget(btn_register)
+        links_row.addWidget(btn_change)
+        links_row.addStretch(1)
+
+        layout.addLayout(actions_row)
+        layout.addLayout(links_row)
         self.username = None
 
     def do_login(self):
@@ -472,23 +699,40 @@ class FunctionPage(QWidget):
         super().__init__(parent)
         self.main_window = main_window
 
-        base = QVBoxLayout(self)
-        btn_back = QPushButton("返回上一页", clicked=self.on_back)
-        btn_back.setFixedWidth(120)
-        btn_back.setStyleSheet(
-            "color:white;"
-            "background-color:black;"
-            "border:2px solid white;"
-            "border-radius:5px;"
+        self.setObjectName("FunctionPage")
+        self.setStyleSheet(
+            f"""
+            QWidget#FunctionPage {{
+                background-color: {UITheme.COLOR_BACKGROUND};
+                color: {UITheme.COLOR_SECONDARY_TEXT};
+            }}
+            QLabel {{
+                font-family: {UITheme.FONT_FAMILY};
+            }}
+            """
         )
+
+        base = QVBoxLayout(self)
+        base.setContentsMargins(UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2,
+                                UITheme.SECTION_SPACING * 2)
+        base.setSpacing(int(UITheme.SECTION_SPACING * 1.5))
+
+        btn_back = QPushButton("返回上一页", clicked=self.on_back)
+        style_secondary_button(btn_back)
+        btn_back.setFont(UITheme.font())
+        btn_back.setMinimumWidth(150)
         base.addWidget(btn_back, alignment=Qt.AlignLeft)
 
         title_label = QLabel(title_str)
-        title_label.setFont(QFont("Microsoft YaHei", 16, QFont.Bold))
-        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setObjectName("PageTitle")
+        title_label.setFont(UITheme.title_font())
+        title_label.setAlignment(Qt.AlignLeft)
         base.addWidget(title_label)
 
         self.content_layout = QVBoxLayout()
+        self.content_layout.setSpacing(UITheme.SECTION_SPACING)
         base.addLayout(self.content_layout)
         base.addStretch()
         self.setLayout(base)
