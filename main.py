@@ -1014,42 +1014,15 @@ class ImageInferencePage(FunctionPage):
             verbose=False,
         )
 
-        def _iou(box_a, box_b):
-            xa1, ya1, xa2, ya2 = box_a
-            xb1, yb1, xb2, yb2 = box_b
-            inter_x1 = max(xa1, xb1)
-            inter_y1 = max(ya1, yb1)
-            inter_x2 = min(xa2, xb2)
-            inter_y2 = min(ya2, yb2)
-            inter_w = max(0.0, inter_x2 - inter_x1)
-            inter_h = max(0.0, inter_y2 - inter_y1)
-            inter_area = inter_w * inter_h
-            if inter_area <= 0:
-                return 0.0
-            area_a = max(0.0, xa2 - xa1) * max(0.0, ya2 - ya1)
-            area_b = max(0.0, xb2 - xb1) * max(0.0, yb2 - yb1)
-            union = area_a + area_b - inter_area
-            if union <= 0:
-                return 0.0
-            return inter_area / union
-
-        id_map = {}
-        next_id = 1
         rows = []
         sample_orig = None
         sample_ann = None
         detail_lines = []
 
-        active_tracks = {}
-        iou_threshold = 0.4
-
         for idx, (fp, res) in enumerate(zip(files, results_gen)):
             orig_bgr = res.orig_img
             ann_bgr = res.plot()
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
-            base, ext = os.path.splitext(os.path.basename(fp))
-            ann_path = os.path.join(scan_dir, f"{base}_annotated{ext}")
-            Image.fromarray(ann_rgb).save(ann_path)
 
             if idx == 0:
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
@@ -1067,51 +1040,30 @@ class ImageInferencePage(FunctionPage):
                 )
 
             detections = []
+            fallback_counter = 1
             for box in res.boxes:
                 cid = int(box.cls[0]) if box.cls is not None else -1
                 cname = res.names.get(cid, str(cid))
                 cconf = float(box.conf[0]) if box.conf is not None else 0.0
                 coords = [float(x) for x in box.xyxy[0].tolist()]
-                detections.append(
-                    {"box": box, "coords": coords, "class": cname, "conf": cconf}
-                )
-
-            unmatched_tracks = set(active_tracks.keys())
-
-            for det in detections:
-                raw_id = getattr(det["box"], "id", None)
-                stable_id = None
+                raw_id = getattr(box, "id", None)
                 if raw_id is not None:
                     rid = int(raw_id.item()) if hasattr(raw_id, "item") else int(raw_id)
-                    stable_id = id_map.get(rid)
-                    if stable_id is None:
-                        stable_id = next_id
-                        next_id += 1
-                        id_map[rid] = stable_id
+                else:
+                    rid = f"{os.path.basename(fp)}#{fallback_counter}"
+                    fallback_counter += 1
+                detections.append(
+                    {
+                        "box": box,
+                        "coords": coords,
+                        "class": cname,
+                        "conf": cconf,
+                        "raw_id": rid,
+                    }
+                )
 
-                if stable_id is None:
-                    best_id = None
-                    best_iou = 0.0
-                    for tid in list(unmatched_tracks):
-                        track_box = active_tracks[tid]["bbox"]
-                        iou = _iou(det["coords"], track_box)
-                        if iou > best_iou:
-                            best_iou = iou
-                            best_id = tid
-                    if best_id is not None and best_iou >= iou_threshold:
-                        stable_id = best_id
-                        unmatched_tracks.discard(best_id)
-
-                if stable_id is None:
-                    stable_id = next_id
-                    next_id += 1
-
-                det["stable_id"] = stable_id
-                active_tracks[stable_id] = {"bbox": det["coords"], "last_seen": idx}
-
-            for tid in list(active_tracks.keys()):
-                if active_tracks[tid]["last_seen"] < idx - 3:
-                    active_tracks.pop(tid, None)
+            for det in detections:
+                det["stable_id"] = det["raw_id"]
 
             for det in detections:
                 x1, y1, x2, y2 = [round(x, 2) for x in det["coords"]]
@@ -1168,22 +1120,12 @@ class ImageInferencePage(FunctionPage):
                 f"<p><b>示例标注图像：</b><br><img src='{ann_data_uri}' width='600'></p>"
             )
             html.append("<h2>检测结果明细</h2>")
-            summary = {}
-            for r in rows:
-                bid = r["bolt_id"]
-                if bid not in summary or r["confidence"] > summary[bid]["confidence"]:
-                    summary[bid] = {
-                        "bolt_id": bid,
-                        "class": r["class"],
-                        "confidence": r["confidence"],
-                    }
             html.append(
-                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
+                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图像</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
             )
-            for bid in sorted(summary):
-                s = summary[bid]
+            for r in rows:
                 html.append(
-                    f"<tr><td>{s['bolt_id']}</td><td>{s['class']}</td><td>{s['confidence']:.3f}</td></tr>"
+                    f"<tr><td>{r['image']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
                 )
             html.append("</table></body></html>")
             report_path = os.path.join(scan_dir, "bolt_detection_report.html")
