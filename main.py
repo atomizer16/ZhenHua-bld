@@ -79,8 +79,8 @@ import matplotlib.pyplot as plt
 
 from scipy.fft import fft, fftfreq
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QPixmap, QImage, QFont
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt5.QtGui import QPixmap, QImage, QFont, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFileDialog, QMessageBox, QTextEdit,
@@ -91,6 +91,7 @@ from PyQt5.QtWidgets import (
 import cv2
 from ultralytics import YOLO
 from PIL import Image
+
 
 ###############################################################################
 #   统一的界面视觉与交互规范
@@ -302,6 +303,114 @@ def add_form_row(container_layout: QVBoxLayout, label_text: str, widget: QWidget
     return row
 
 
+def add_card_row(container_layout: QVBoxLayout, cards):
+    """将多个卡片横向排列后添加到给定的垂直布局中。"""
+
+    row_layout = QHBoxLayout()
+    row_layout.setContentsMargins(0, 0, 0, 0)
+    row_layout.setSpacing(UITheme.SECTION_SPACING)
+
+    for item in cards:
+        widget = item
+        stretch = 1
+        if isinstance(item, tuple):
+            widget, stretch = item
+
+        if isinstance(widget, QWidget):
+            widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+
+        row_layout.addWidget(widget, stretch)
+
+    container_layout.addLayout(row_layout)
+    return row_layout
+
+
+def create_header_divider():
+    line = QFrame()
+    line.setFrameShape(QFrame.VLine)
+    line.setFrameShadow(QFrame.Plain)
+    line.setFixedWidth(1)
+    line.setStyleSheet(f"background-color: {UITheme.COLOR_BORDER};")
+    line.setFixedHeight(UITheme.CONTROL_HEIGHT)
+    line.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    return line
+
+
+def create_pill_button(text: str, active: bool = False, parent=None):
+    button = QPushButton(text, parent)
+    button.setCursor(Qt.PointingHandCursor)
+    button.setCheckable(True)
+    button.setChecked(active)
+    button.setMinimumHeight(max(32, UITheme.CONTROL_HEIGHT - 6))
+    radius = button.minimumHeight() // 2
+    base_border = UITheme.COLOR_PRIMARY if active else UITheme.COLOR_BORDER
+    base_color = UITheme.COLOR_PRIMARY if active else UITheme.COLOR_SECONDARY_TEXT
+    base_bg = "rgba(37, 99, 235, 0.12)" if active else "transparent"
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            border-radius: {radius}px;
+            border: 1px solid {base_border};
+            background-color: {base_bg};
+            color: {base_color};
+            padding: 0 {UITheme.SECTION_SPACING}px;
+        }}
+        QPushButton:hover {{
+            border-color: {UITheme.COLOR_PRIMARY_HOVER};
+            color: {UITheme.COLOR_PRIMARY};
+        }}
+        QPushButton:checked {{
+            border-color: {UITheme.COLOR_PRIMARY};
+            background-color: rgba(37, 99, 235, 0.12);
+            color: {UITheme.COLOR_PRIMARY};
+        }}
+        QPushButton:checked:hover {{
+            border-color: {UITheme.COLOR_PRIMARY_HOVER};
+        }}
+        QPushButton:disabled {{
+            border-color: {base_border};
+            background-color: {base_bg};
+            color: {base_color};
+        }}
+        """
+    )
+    if active:
+        button.setEnabled(False)
+    return button
+
+
+def build_vision_mode_actions(main_window, active_key: str):
+    items = [
+        ("图片推理", 2, "image"),
+        ("视频推理", 3, "video"),
+        ("摄像头检测", 4, "camera"),
+        ("设置与帮助", 5, "settings"),
+    ]
+    actions = []
+    for label, page_idx, key in items:
+        btn = create_pill_button(label, active=(key == active_key))
+        if key != active_key:
+            btn.clicked.connect(lambda _=False, idx=page_idx: main_window.gotoPage(idx))
+        actions.append(btn)
+    return actions
+
+
+def build_settings_mode_actions(main_window, active_key: str):
+    items = [
+        ("推理参数", 5, "core"),
+        ("MQTT 上传", 7, "mqtt"),
+        ("WebDAV 上传", 8, "webdav"),
+        ("OTA 更新", 9, "ota"),
+    ]
+    actions = []
+    for label, page_idx, key in items:
+        btn = create_pill_button(label, active=(key == active_key))
+        if key != active_key:
+            btn.clicked.connect(lambda _=False, idx=page_idx: main_window.gotoPage(idx))
+        actions.append(btn)
+    return actions
+
+
 def create_navigation_card(title: str, description: str, parent=None):
     card = create_card_frame(parent)
     card.setObjectName("NavigationCard")
@@ -409,7 +518,7 @@ class ChangePasswordDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("修改密码")
-        self.setFixedSize(450, 350)
+        self.setFixedSize(400, 350)
         apply_dialog_frame(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
@@ -482,7 +591,7 @@ class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("用户登录")
-        self.setFixedSize(500, 300)
+        self.setFixedSize(400, 300)
         apply_dialog_frame(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(UITheme.SECTION_SPACING * 3 // 2,
@@ -818,7 +927,15 @@ class FunctionPage(QWidget):
         title_container.addWidget(self.subtitle_label)
 
         header.addLayout(title_container, stretch=1)
-        header.addStretch()
+
+        self._actions_host = QWidget()
+        self._actions_host.setObjectName("HeaderActionsHost")
+        self._actions_host.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+        self._actions_layout = QHBoxLayout(self._actions_host)
+        self._actions_layout.setContentsMargins(0, 0, 0, 0)
+        self._actions_layout.setSpacing(UITheme.SECTION_SPACING // 2)
+        header.addWidget(self._actions_host, alignment=Qt.AlignRight)
+        self._actions_host.hide()
         base.addLayout(header)
 
         self.scroll_area = QScrollArea()
@@ -843,6 +960,102 @@ class FunctionPage(QWidget):
         else:
             self.subtitle_label.hide()
 
+    def clear_header_actions(self):
+        while self._actions_layout.count():
+            item = self._actions_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+
+    def set_header_actions(self, widgets):
+        self.clear_header_actions()
+        for widget in widgets:
+            self._actions_layout.addWidget(widget)
+        if widgets:
+            self._actions_host.show()
+        else:
+            self._actions_host.hide()
+
+
+class RecentBatchList(QWidget):
+    """显示最近检测批次的简易列表，辅助用户快速回溯结果。"""
+
+    def __init__(self, main_window, allowed_types=None, empty_text="暂无历史批次", parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.allowed_types = allowed_types
+        self.empty_text = empty_text
+
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(UITheme.SECTION_SPACING // 2)
+
+        self.refresh()
+
+    def refresh(self):
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        batches = get_all_batches(self.main_window.save_root_dir)
+        if self.allowed_types:
+            batches = [b for b in batches if b.get("type") in self.allowed_types]
+
+        if not batches:
+            label = QLabel(self.empty_text)
+            label.setWordWrap(True)
+            label.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+            label.setFont(UITheme.font())
+            self._layout.addWidget(label)
+            self._layout.addStretch()
+            return
+
+        for batch in batches[:3]:
+            self._layout.addWidget(self._create_entry(batch))
+
+        self._layout.addStretch()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def _create_entry(self, batch):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(UITheme.SECTION_SPACING // 2)
+
+        info = QLabel(self._format_batch_text(batch))
+        info.setFont(UITheme.font())
+        layout.addWidget(info)
+
+        btn_open = QPushButton("打开目录")
+        style_text_button(btn_open)
+        btn_open.clicked.connect(lambda _=False, path=batch.get("path"): self._open_folder(path))
+        layout.addWidget(btn_open)
+        layout.addStretch()
+        return widget
+
+    def _format_batch_text(self, batch):
+        raw_time = batch.get("time", "")
+        time_display = raw_time
+        try:
+            time_display = datetime.datetime.strptime(raw_time, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+        type_map = {"p": "图片批次", "v": "视频批次", "c": "摄像头批次"}
+        type_text = type_map.get(batch.get("type"), "其他批次")
+        name = batch.get("name", "")
+        return f"{time_display} · {type_text} · {name}"
+
+    def _open_folder(self, path):
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        else:
+            QMessageBox.warning(self, "提示", "对应目录不存在或已被移动。")
+
 
 ###############################################################################
 #   图片推理页面
@@ -853,6 +1066,7 @@ class ImageInferencePage(FunctionPage):
         self.model         = model
         self.conf_thres    = conf_thres
         self.device_option = device_option
+        self.set_header_actions(build_vision_mode_actions(self.main_window, "image"))
         self.initUI()
 
     def initUI(self):
@@ -905,7 +1119,6 @@ class ImageInferencePage(FunctionPage):
         image_row.addWidget(self.label_orig)
         image_row.addWidget(self.label_res)
         preview_layout.addLayout(image_row)
-        self.content_layout.addWidget(preview_card)
 
         detail_card, detail_layout = create_section_card(
             "检测详情",
@@ -919,7 +1132,22 @@ class ImageInferencePage(FunctionPage):
             f"border-radius: {UITheme.CONTROL_RADIUS}px;"
         )
         detail_layout.addWidget(self.text_detail)
-        self.content_layout.addWidget(detail_card)
+
+        add_card_row(
+            self.content_layout,
+            [
+                (preview_card, 3),
+                (detail_card, 2),
+            ],
+        )
+
+        history_card, history_layout = create_section_card(
+            "最近图片批次",
+            "系统会自动列出最近完成的图片检测批次，方便快速回溯结果归档。",
+        )
+        self.history_list = RecentBatchList(self.main_window, allowed_types={"p"})
+        history_layout.addWidget(self.history_list)
+        self.content_layout.addWidget(history_card)
 
     def select_image(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -929,8 +1157,9 @@ class ImageInferencePage(FunctionPage):
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            rows, sample_orig, sample_ann, ann_infos = self.run_inference([fp], scan_dir)
-            self.archive_results(rows, sample_orig, sample_ann, ann_infos, scan_dir)
+            rows, sample_orig, sample_ann, annotated_infos = self.run_inference([fp], scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
+            self.history_list.refresh()
             QMessageBox.information(
                 self, "检测结果归档完成", f"本次检测所有结果已保存到：\n{scan_dir}"
             )
@@ -971,8 +1200,9 @@ class ImageInferencePage(FunctionPage):
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            rows, sample_orig, sample_ann, ann_infos = self.run_inference(files, scan_dir)
-            self.archive_results(rows, sample_orig, sample_ann, ann_infos, scan_dir)
+            rows, sample_orig, sample_ann, annotated_infos = self.run_inference(files, scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
+            self.history_list.refresh()
             QMessageBox.information(
                 self,
                 "检测完成",
@@ -1165,6 +1395,7 @@ class VideoInferencePage(FunctionPage):
         self.device_option = device_option
         self.thread        = None
         self.out_path      = ""
+        self.set_header_actions(build_vision_mode_actions(self.main_window, "video"))
         self.initUI()
 
     def initUI(self):
@@ -1209,7 +1440,19 @@ class VideoInferencePage(FunctionPage):
         self.btn_open.setEnabled(False)
         preview_layout.addWidget(self.btn_open, alignment=Qt.AlignLeft)
 
-        self.content_layout.addWidget(preview_card)
+        history_card, history_layout = create_section_card(
+            "最近视频批次",
+            "展示最近归档的视频检测任务，快速核对导出结果。",
+        )
+        self.history_list = RecentBatchList(self.main_window, allowed_types={"v"})
+        history_layout.addWidget(self.history_list)
+        add_card_row(
+            self.content_layout,
+            [
+                (preview_card, 3),
+                (history_card, 2),
+            ],
+        )
 
     def select_video(self):
         fp, _ = QFileDialog.getOpenFileName(
@@ -1329,6 +1572,7 @@ class VideoInferencePage(FunctionPage):
                 "检测结果归档完成",
                 f"本次检测所有结果已保存到：\n{scan_dir}"
             )
+            self.history_list.refresh()
 
             mw = self.main_window
             upload_msgs = []
@@ -1407,6 +1651,7 @@ class CameraPage(FunctionPage):
         self.conf_thres    = conf_thres
         self.device_option = device_option
         self.thread        = None
+        self.set_header_actions(build_vision_mode_actions(self.main_window, "camera"))
         self.initUI()
 
     def initUI(self):
@@ -1446,7 +1691,19 @@ class CameraPage(FunctionPage):
         )
         preview_layout.addWidget(self.label_cam)
 
-        self.content_layout.addWidget(preview_card)
+        history_card, history_layout = create_section_card(
+            "最近摄像头批次",
+            "当实时检测结束并归档后，最近的摄像头批次将列在此处。",
+        )
+        self.history_list = RecentBatchList(self.main_window, allowed_types={"c"})
+        history_layout.addWidget(self.history_list)
+        add_card_row(
+            self.content_layout,
+            [
+                (preview_card, 3),
+                (history_card, 2),
+            ],
+        )
 
     def start_camera(self):
         if self.thread:
@@ -1488,6 +1745,10 @@ class CameraPage(FunctionPage):
 class SettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
         super().__init__(mw, "设置与帮助", parent)
+        actions = build_vision_mode_actions(self.main_window, "settings")
+        actions.append(create_header_divider())
+        actions.extend(build_settings_mode_actions(self.main_window, "core"))
+        self.set_header_actions(actions)
         self.initUI()
 
     def initUI(self):
@@ -1858,6 +2119,10 @@ class MqttUploader:
 class UploadSettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
         super().__init__(mw, "云端上传设置", parent)
+        actions = build_vision_mode_actions(self.main_window, "settings")
+        actions.append(create_header_divider())
+        actions.extend(build_settings_mode_actions(self.main_window, "mqtt"))
+        self.set_header_actions(actions)
         self.initUI()
 
     def initUI(self):
@@ -2189,6 +2454,10 @@ class WebDAVUploader:
 class WebDAVUploadSettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
         super().__init__(mw, "WebDAV云端上传设置", parent)
+        actions = build_vision_mode_actions(self.main_window, "settings")
+        actions.append(create_header_divider())
+        actions.extend(build_settings_mode_actions(self.main_window, "webdav"))
+        self.set_header_actions(actions)
         self.initUI()
 
     def initUI(self):
@@ -2342,6 +2611,10 @@ class OTASettingsPage(FunctionPage):
         super().__init__(mw, "OTA 设置", parent)
         self.thread = None
         self.progress = None
+        actions = build_vision_mode_actions(self.main_window, "settings")
+        actions.append(create_header_divider())
+        actions.extend(build_settings_mode_actions(self.main_window, "ota"))
+        self.set_header_actions(actions)
         self.initUI()
 
     def initUI(self):
@@ -2466,7 +2739,7 @@ class MainHomePage(QWidget):
 
         self.overlay = QWidget(self.bg_label)
         self.overlay.setObjectName("MainHomeOverlay")
-        self.overlay.setStyleSheet("background-color: rgba(20, 20, 20, 0.7);")
+        self.overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.58);")
         overlay_layout = QVBoxLayout(self.overlay)
         overlay_layout.setContentsMargins(0, 0, 0, 0)
         overlay_layout.setSpacing(0)
