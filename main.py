@@ -929,8 +929,8 @@ class ImageInferencePage(FunctionPage):
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            rows, sample_orig, sample_ann = self.run_inference([fp], scan_dir)
-            self.archive_results(rows, sample_orig, sample_ann, scan_dir)
+            rows, sample_orig, sample_ann, ann_infos = self.run_inference([fp], scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, ann_infos, scan_dir)
             QMessageBox.information(
                 self, "检测结果归档完成", f"本次检测所有结果已保存到：\n{scan_dir}"
             )
@@ -971,8 +971,8 @@ class ImageInferencePage(FunctionPage):
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         try:
-            rows, sample_orig, sample_ann = self.run_inference(files, scan_dir)
-            self.archive_results(rows, sample_orig, sample_ann, scan_dir)
+            rows, sample_orig, sample_ann, ann_infos = self.run_inference(files, scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, ann_infos, scan_dir)
             QMessageBox.information(
                 self,
                 "检测完成",
@@ -1018,11 +1018,28 @@ class ImageInferencePage(FunctionPage):
         sample_orig = None
         sample_ann = None
         detail_lines = []
+        annotated_infos = []  # [(source_name, annotated_path)]
 
         for idx, (fp, res) in enumerate(zip(files, results_gen)):
             orig_bgr = res.orig_img
             ann_bgr = res.plot()
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
+
+            # 保存带检测框的图像
+            ann_path = None
+            try:
+                base_name = os.path.basename(fp)
+                stem, ext = os.path.splitext(base_name)
+                if not ext:
+                    ext = ".jpg"
+                ann_filename = f"{stem}_det{ext}"
+                ann_path = os.path.join(scan_dir, ann_filename)
+                success = cv2.imwrite(ann_path, ann_bgr)
+                if not success:
+                    ann_path = None
+            except Exception:
+                ann_path = None
+            annotated_infos.append((os.path.basename(fp), ann_path))
 
             if idx == 0:
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
@@ -1090,9 +1107,9 @@ class ImageInferencePage(FunctionPage):
                 pass
 
         self.text_detail.setPlainText("\n".join(detail_lines))
-        return rows, sample_orig, sample_ann
+        return rows, sample_orig, sample_ann, annotated_infos
 
-    def archive_results(self, rows, sample_orig, sample_ann, scan_dir):
+    def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_dir):
         try:
             cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
             pd.DataFrame(rows, columns=cols).to_csv(
