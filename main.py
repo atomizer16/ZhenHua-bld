@@ -793,40 +793,102 @@ class VideoProcessingThread(QThread):
 
 
 class CameraCaptureThread(QThread):
-    frame_signal = pyqtSignal(QImage)
+    frame_signal    = pyqtSignal(QImage)
+    finished_signal = pyqtSignal(dict)
+    error_signal    = pyqtSignal(str)
 
-    def __init__(self, model, conf_thres, device_option, parent=None):
+    def __init__(
+        self,
+        model,
+        conf_thres,
+        device_option,
+        save_root_dir,
+        capture_mode="video",
+        parent=None,
+    ):
         super().__init__(parent)
         self.model         = model
         self.conf_thres    = conf_thres
         self.device_option = device_option
-        self._running      = True
+        self.save_root_dir = save_root_dir
+        self.capture_mode  = capture_mode if capture_mode in {"video", "images"} else "video"
+
+        self.scan_dir = make_scan_dir(self.save_root_dir, "c")
+        base_name     = os.path.basename(self.scan_dir)
+        parts         = base_name.split("_")
+        if len(parts) >= 3:
+            self.scan_timestamp = f"{parts[1]}_{parts[2]}"
+        else:
+            self.scan_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        self.video_path   = os.path.join(self.scan_dir, f"Video_{self.scan_timestamp}.mp4")
+        self.saved_frames = []
+        self._running     = True
 
     def run(self):
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
+        try:
+            cap = cv2.VideoCapture(0)
+        except Exception as e:
+            self.error_signal.emit(f"摄像头打开失败：{e}")
             return
-        while self._running:
-            ok, frame = cap.read()
-            if not ok:
-                continue
-            try:
-                res = self.model.predict(
-                    source = frame,
-                    conf   = self.conf_thres,
-                    device = self.device_option,
-                    imgsz  = 640
-                )[0]
-                ann_bgr = res.plot(img=frame.copy())
-            except Exception as e:
-                ann_bgr = frame
 
-            ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
-            hh, ww, cc = ann_rgb.shape
-            qimg = QImage(ann_rgb.data, ww, hh, ww*3, QImage.Format_RGB888)
-            self.frame_signal.emit(qimg)
+        if not cap.isOpened():
+            self.error_signal.emit("无法打开摄像头，请检查设备连接。")
+            return
 
-        cap.release()
+        writer = None
+        frame_size = (
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720),
+        )
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or math.isnan(fps) or fps <= 1.0:
+            fps = 20.0
+
+        if self.capture_mode == "video":
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(self.video_path, fourcc, fps, frame_size)
+            if not writer.isOpened():
+                cap.release()
+                self.error_signal.emit("视频写入器初始化失败。")
+                return
+
+        frame_index = 0
+        success = False
+        try:
+            while self._running:
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+
+                if self.capture_mode == "video":
+                    writer.write(frame)
+                else:
+                    frame_index += 1
+                    img_path = os.path.join(self.scan_dir, f"Image{frame_index}.jpg")
+                    if cv2.imwrite(img_path, frame):
+                        self.saved_frames.append(img_path)
+
+                ann_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                hh, ww, _ = ann_rgb.shape
+                qimg = QImage(ann_rgb.data, ww, hh, ww * 3, QImage.Format_RGB888)
+                self.frame_signal.emit(qimg)
+                success = True
+        finally:
+            self._running = False
+            cap.release()
+            if writer is not None:
+                writer.release()
+
+        info = {
+            "success": success,
+            "scan_dir": self.scan_dir,
+            "mode": self.capture_mode,
+            "video_path": self.video_path if self.capture_mode == "video" and success else "",
+            "frames": list(self.saved_frames),
+            "message": "" if success else "摄像头未捕获到有效画面。",
+        }
+        self.finished_signal.emit(info)
 
     def stop(self):
         self._running = False
@@ -1651,6 +1713,7 @@ class CameraPage(FunctionPage):
         self.conf_thres    = conf_thres
         self.device_option = device_option
         self.thread        = None
+        self.capture_mode  = "video"  # 可根据需要切换为 "images"
         self.set_header_actions(build_vision_mode_actions(self.main_window, "camera"))
         self.initUI()
 
@@ -1709,9 +1772,15 @@ class CameraPage(FunctionPage):
         if self.thread:
             self.stop_camera()
         self.thread = CameraCaptureThread(
-            self.model, self.conf_thres, self.device_option
+            self.model,
+            self.conf_thres,
+            self.device_option,
+            self.main_window.save_root_dir,
+            capture_mode=self.capture_mode,
         )
         self.thread.frame_signal.connect(self.update_frame)
+        self.thread.finished_signal.connect(self.handle_capture_finished)
+        self.thread.error_signal.connect(self.handle_capture_error)
         self.thread.start()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -1719,9 +1788,7 @@ class CameraPage(FunctionPage):
     def stop_camera(self):
         if self.thread:
             self.thread.stop()
-            self.thread = None
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+            self.btn_stop.setEnabled(False)
 
     def update_frame(self, qimg):
         target_w = max(self.label_cam.width(), self.label_cam.minimumWidth())
@@ -1730,6 +1797,174 @@ class CameraPage(FunctionPage):
             target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.label_cam.setPixmap(pm)
+
+    def handle_capture_error(self, message):
+        QMessageBox.critical(self, "摄像头错误", message)
+        self.thread = None
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+    def handle_capture_finished(self, info):
+        self.thread = None
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        if not info.get("success", False):
+            if info.get("message"):
+                QMessageBox.warning(self, "提示", info["message"])
+            return
+
+        try:
+            self.run_post_detection(info)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"检测处理失败: {e}")
+
+    def run_post_detection(self, info):
+        scan_dir = info.get("scan_dir")
+        if not scan_dir or not os.path.isdir(scan_dir):
+            QMessageBox.warning(self, "提示", "未找到有效的扫描目录。")
+            return
+
+        result_dir = os.path.join(scan_dir, "result")
+        os.makedirs(result_dir, exist_ok=True)
+
+        if info.get("mode") == "images":
+            image_paths = info.get("frames", [])
+            if not image_paths:
+                QMessageBox.information(self, "提示", "未捕获到任何图片帧。")
+                return
+
+            image_page = self.main_window.page_image
+            rows, sample_orig, sample_ann, annotated_infos = image_page.run_inference(
+                image_paths, result_dir
+            )
+            image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, result_dir)
+
+            try:
+                cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+                pd.DataFrame(rows, columns=cols).to_excel(
+                    os.path.join(result_dir, "bolt_detection_result.csv"),
+                    index=False,
+                )
+            except Exception:
+                pass
+
+            QMessageBox.information(
+                self,
+                "检测完成",
+                f"摄像头检测已完成，结果保存在：\n{result_dir}",
+            )
+
+        else:
+            video_path = info.get("video_path")
+            if not video_path or not os.path.exists(video_path):
+                QMessageBox.warning(self, "提示", "未生成有效的视频文件。")
+                return
+
+            thread = VideoProcessingThread(
+                video_path, self.model, self.conf_thres, self.device_option
+            )
+            thread.run()
+
+            processed_src = os.path.abspath("temp_output_video.mp4")
+            dest_video_path = ""
+            if os.path.exists(processed_src):
+                base_name = os.path.splitext(os.path.basename(video_path))[0]
+                dest_video_path = os.path.join(result_dir, f"{base_name}_det.mp4")
+                try:
+                    if os.path.exists(dest_video_path):
+                        os.remove(dest_video_path)
+                    shutil.move(processed_src, dest_video_path)
+                except Exception:
+                    dest_video_path = os.path.join(result_dir, os.path.basename(processed_src))
+                    try:
+                        if os.path.exists(dest_video_path):
+                            os.remove(dest_video_path)
+                        shutil.move(processed_src, dest_video_path)
+                    except Exception:
+                        try:
+                            os.remove(processed_src)
+                        except Exception:
+                            pass
+
+            frame_records = getattr(thread, "frame_records", None)
+            columns = ["frame", "bolt_id", "status", "conf"]
+            if frame_records:
+                df = pd.DataFrame(frame_records)
+            else:
+                df = pd.DataFrame(columns=columns)
+
+            df = df.reindex(columns=columns)
+
+            csv_path = os.path.join(result_dir, "bolt_detection_result.csv")
+            df.to_csv(csv_path, index=False)
+
+            for img, bolt_id, frame_idx in getattr(thread, "loose_frames", []):
+                try:
+                    cv2.imwrite(
+                        os.path.join(
+                            result_dir, f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
+                        ),
+                        img,
+                    )
+                except Exception:
+                    pass
+
+            report_path = os.path.join(result_dir, "video_detection_report.html")
+            try:
+                html = []
+                html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
+                html.append("<h1>视频检测报告</h1>")
+                if (
+                    thread.first_frame_orig is not None
+                    and thread.first_frame_ann is not None
+                ):
+                    fmt = "JPEG"
+                    try:
+                        orig_rgb = cv2.cvtColor(thread.first_frame_orig, cv2.COLOR_BGR2RGB)
+                        ann_rgb = cv2.cvtColor(thread.first_frame_ann, cv2.COLOR_BGR2RGB)
+                        orig_img = Image.fromarray(orig_rgb)
+                        ann_img = Image.fromarray(ann_rgb)
+                        orig_buf = io.BytesIO()
+                        ann_buf = io.BytesIO()
+                        orig_img.save(orig_buf, format=fmt)
+                        ann_img.save(ann_buf, format=fmt)
+                        orig_b64 = base64.b64encode(orig_buf.getvalue()).decode("utf-8")
+                        ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
+                        html.append(
+                            f"<p><b>原始示例帧：</b><br><img src='data:image/{fmt.lower()};base64,{orig_b64}' width='600'></p>"
+                        )
+                        html.append(
+                            f"<p><b>标注示例帧：</b><br><img src='data:image/{fmt.lower()};base64,{ann_b64}' width='600'></p>"
+                        )
+                    except Exception:
+                        pass
+
+                html.append("<h2>检测结果</h2>")
+                detected = getattr(thread, "detected_objects", {})
+                if not detected:
+                    html.append("<p>未检测到任何目标。</p>")
+                else:
+                    html.append("<ul>")
+                    for sid, cname in sorted(detected.items()):
+                        html.append(f"<li>螺栓编号 {sid}: 状态 = {cname}</li>")
+                    html.append("</ul>")
+
+                if dest_video_path:
+                    rel_name = os.path.basename(dest_video_path)
+                    html.append(f"<p>输出视频文件：<a href='{rel_name}'>{rel_name}</a></p>")
+                html.append("</body></html>")
+                with open(report_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(html))
+            except Exception:
+                pass
+
+            QMessageBox.information(
+                self,
+                "检测完成",
+                f"摄像头检测已完成，结果保存在：\n{result_dir}",
+            )
+
+        self.history_list.refresh()
 
     def on_back(self):
         # 停止摄像头线程
