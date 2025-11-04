@@ -2109,7 +2109,7 @@ class VisionHomePage(QWidget):
 
         self.overlay = QWidget(self.bg_label)
         self.overlay.setObjectName("VisionOverlay")
-        self.overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.58);")
+        self.overlay.setStyleSheet("background-color: rgba(255, 255, 255, 0.58);")
         overlay_layout = QVBoxLayout(self.overlay)
         overlay_layout.setContentsMargins(0, 0, 0, 0)
         overlay_layout.setSpacing(0)
@@ -2122,14 +2122,14 @@ class VisionHomePage(QWidget):
 
         title = QLabel("视觉监测功能")
         title.setFont(QFont(UITheme.FONT_FAMILY, 38, QFont.Bold))
-        title.setStyleSheet("color:#FFFFFF;")
+        title.setStyleSheet("color:#FFFF0000;")
         title.setAlignment(Qt.AlignCenter)
         hero_layout.addWidget(title)
 
         subtitle = QLabel("根据不同采集方式启动推理任务，查看检测结果与归档记录。")
         subtitle.setFont(UITheme.subtitle_font())
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.82);")
+        subtitle.setStyleSheet("color: rgba(255,0,0,0.52);")
         subtitle.setWordWrap(True)
         hero_layout.addWidget(subtitle)
 
@@ -2974,7 +2974,7 @@ class MainHomePage(QWidget):
 
         self.overlay = QWidget(self.bg_label)
         self.overlay.setObjectName("MainHomeOverlay")
-        self.overlay.setStyleSheet("background-color: rgba(15, 23, 42, 0.58);")
+        self.overlay.setStyleSheet("background-color: rgba(255, 255, 255, 0.58);")
         overlay_layout = QVBoxLayout(self.overlay)
         overlay_layout.setContentsMargins(0, 0, 0, 0)
         overlay_layout.setSpacing(0)
@@ -2987,14 +2987,14 @@ class MainHomePage(QWidget):
 
         title = QLabel("岸桥轨道螺栓松动监测系统")
         title.setFont(QFont(UITheme.FONT_FAMILY, 44, QFont.Bold))
-        title.setStyleSheet("color: #FFFFFF;")
+        title.setStyleSheet("color: #FFFF0000;")
         title.setAlignment(Qt.AlignCenter)
         hero_layout.addWidget(title)
 
         subtitle = QLabel("统一的视觉与振动监测平台，为运维团队提供高效稳定的安全巡检能力。")
         subtitle.setFont(UITheme.subtitle_font())
         subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("color: rgba(255,255,255,0.82);")
+        subtitle.setStyleSheet("color: rgba(255,0,0,0.82);")
         subtitle.setWordWrap(True)
         hero_layout.addWidget(subtitle)
 
