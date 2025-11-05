@@ -1261,8 +1261,27 @@ class ImageInferencePage(FunctionPage):
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        progress_dialog = QProgressDialog("正在检测图片...", "", 0, len(files), self)
+        progress_dialog.setWindowTitle("检测进度")
+        progress_dialog.setCancelButton(None)
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setAutoClose(True)
+        progress_dialog.setAutoReset(True)
+        progress_dialog.setValue(0)
+
+        def update_progress(done, total):
+            progress_dialog.setLabelText(f"正在检测图片（{done}/{total}）")
+            progress_dialog.setValue(done)
+            QApplication.processEvents()
+
+        progress_dialog.show()
         try:
-            rows, sample_orig, sample_ann, annotated_infos = self.run_inference(files, scan_dir)
+            rows, sample_orig, sample_ann, annotated_infos = self.run_inference(
+                files, scan_dir, progress_callback=update_progress
+            )
+            progress_dialog.setValue(len(files))
             self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
             self.history_list.refresh()
             QMessageBox.information(
@@ -1287,14 +1306,19 @@ class ImageInferencePage(FunctionPage):
                     QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"发生错误: {e}")
+        finally:
+            progress_dialog.close()
 
-    def run_inference(self, files, scan_dir):
+    def run_inference(self, files, scan_dir, progress_callback=None):
         files = sorted(
             files,
             key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group())
             if re.search(r"\d+", os.path.basename(p))
             else float("inf"),
         )
+        total = len(files)
+        if progress_callback:
+            progress_callback(0, total)
         results_gen = self.model.track(
             source=files,
             conf=self.conf_thres,
@@ -1391,6 +1415,9 @@ class ImageInferencePage(FunctionPage):
                 detail_lines.append(
                     f"{os.path.basename(fp)} - ID {det['stable_id']} - {det['class']}({det['conf']:.3f})"
                 )
+
+            if progress_callback:
+                progress_callback(idx + 1, total)
 
         if hasattr(self.model, "tracker") and self.model.tracker is not None:
             try:
@@ -1827,16 +1854,45 @@ class CameraPage(FunctionPage):
         result_dir = os.path.join(scan_dir, "result")
         os.makedirs(result_dir, exist_ok=True)
 
+        progress_dialog = None
+
         if info.get("mode") == "images":
             image_paths = info.get("frames", [])
             if not image_paths:
                 QMessageBox.information(self, "提示", "未捕获到任何图片帧。")
                 return
 
-            image_page = self.main_window.page_image
-            rows, sample_orig, sample_ann, annotated_infos = image_page.run_inference(
-                image_paths, result_dir
+            progress_dialog = QProgressDialog(
+                "正在推理摄像头图片...", "", 0, len(image_paths), self
             )
+            progress_dialog.setWindowTitle("推理进度")
+            progress_dialog.setCancelButton(None)
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(True)
+            progress_dialog.setAutoReset(True)
+            progress_dialog.setValue(0)
+
+            def update_image_progress(done, total):
+                if progress_dialog is None or not progress_dialog.isVisible():
+                    return
+                progress_dialog.setLabelText(f"正在推理摄像头图片（{done}/{total}）")
+                progress_dialog.setMaximum(max(total, 1))
+                progress_dialog.setValue(done)
+                QApplication.processEvents()
+
+            progress_dialog.show()
+
+            image_page = self.main_window.page_image
+            try:
+                rows, sample_orig, sample_ann, annotated_infos = image_page.run_inference(
+                    image_paths, result_dir, progress_callback=update_image_progress
+                )
+                progress_dialog.setValue(len(image_paths))
+            finally:
+                progress_dialog.close()
+                progress_dialog = None
+
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, result_dir)
 
             try:
@@ -1860,10 +1916,34 @@ class CameraPage(FunctionPage):
                 QMessageBox.warning(self, "提示", "未生成有效的视频文件。")
                 return
 
+            progress_dialog = QProgressDialog("正在推理摄像头视频...", "", 0, 100, self)
+            progress_dialog.setWindowTitle("推理进度")
+            progress_dialog.setCancelButton(None)
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(True)
+            progress_dialog.setAutoReset(True)
+            progress_dialog.setValue(0)
+
+            def update_video_progress(val):
+                if progress_dialog is None or not progress_dialog.isVisible():
+                    return
+                progress_dialog.setLabelText(f"正在推理摄像头视频（{val}%）")
+                progress_dialog.setValue(val)
+                QApplication.processEvents()
+
             thread = VideoProcessingThread(
                 video_path, self.model, self.conf_thres, self.device_option
             )
-            thread.run()
+            thread.progress_update.connect(update_video_progress)
+
+            progress_dialog.show()
+            try:
+                thread.run()
+                progress_dialog.setValue(100)
+            finally:
+                progress_dialog.close()
+                progress_dialog = None
 
             processed_src = os.path.abspath("temp_output_video.mp4")
             dest_video_path = ""
