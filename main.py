@@ -56,6 +56,34 @@ def save_users(users):
     with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(users, f, ensure_ascii=False, indent=4)
 
+
+# —— 跟踪器状态管理 ——
+def reset_tracker_state(model):
+    """重置 YOLO 跟踪器的内部计数，避免不同功能之间 ID 交叉污染。
+
+    Video 和 图片批量检测共用同一个模型实例，为确保每次调用 track()
+    时的 ID 都从 1 开始，需要在真正开始推理前清空跟踪器的缓存。
+    """
+    try:
+        tracker = getattr(model, "tracker", None)
+        if tracker is None:
+            return
+
+        # Ultralytics 内部的主 tracker
+        inner_tracker = getattr(tracker, "tracker", None)
+        if inner_tracker and hasattr(inner_tracker, "reset"):
+            inner_tracker.reset()
+
+        # 某些实现里会有 tracker_list（多源）
+        tracker_list = getattr(tracker, "tracker_list", None)
+        if tracker_list:
+            for t in tracker_list:
+                if hasattr(t, "reset"):
+                    t.reset()
+    except Exception:
+        # 重置失败不阻塞主流程
+        pass
+
 # —— 资源路径统一管理 ——
 CRANE_IMAGE_PATH = os.path.join(BASE_DIR, "crane.jpg")
 WEIGHTS_PATH     = os.path.join(BASE_DIR, "best.pt")
@@ -689,6 +717,9 @@ class VideoProcessingThread(QThread):
         self.loose_frames = []   # [(frame_image, bolt_id, frame_idx)]
 
     def run(self):
+        # 每次视频推理前强制清空跟踪器状态，保证 ID 从 1 开始
+        reset_tracker_state(self.model)
+
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             self.finished_signal.emit("")
@@ -1310,6 +1341,9 @@ class ImageInferencePage(FunctionPage):
             progress_dialog.close()
 
     def run_inference(self, files, scan_dir, progress_callback=None):
+        # 确保每次批量检测前重置跟踪器，避免上一功能的 ID 计数影响本次结果
+        reset_tracker_state(self.model)
+
         files = sorted(
             files,
             key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group())
