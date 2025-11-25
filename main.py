@@ -1159,6 +1159,9 @@ class ImageInferencePage(FunctionPage):
         self.model         = model
         self.conf_thres    = conf_thres
         self.device_option = device_option
+        self.folder_sort_reverse = False
+        self.folder_sort_mode = "manual"  # manual | auto
+        self.folder_scan_count = 0
         self.set_header_actions(build_vision_mode_actions(self.main_window, "image"))
         self.initUI()
 
@@ -1177,8 +1180,20 @@ class ImageInferencePage(FunctionPage):
         btn_dir = QPushButton("选择图片文件夹", clicked=self.select_folder)
         style_secondary_button(btn_dir)
         action_row.addWidget(btn_dir)
+
+        self.btn_sort_mode = QPushButton()
+        style_secondary_button(self.btn_sort_mode)
+        self.btn_sort_mode.clicked.connect(self.toggle_sort_mode)
+        action_row.addWidget(self.btn_sort_mode)
+
+        self.btn_sort_order = QPushButton()
+        style_secondary_button(self.btn_sort_order)
+        self.btn_sort_order.clicked.connect(self.toggle_folder_sort)
+        self._update_sort_button_label()
+        action_row.addWidget(self.btn_sort_order)
         action_row.addStretch()
 
+        self._update_sort_mode_button_label()
         quick_layout.addLayout(action_row)
         self.content_layout.addWidget(quick_card)
 
@@ -1279,6 +1294,8 @@ class ImageInferencePage(FunctionPage):
         if not dir_path:
             return
         exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+        if self.folder_sort_mode == "auto":
+            self.folder_sort_reverse = self._next_auto_reverse()
         names = [
             f
             for f in os.listdir(dir_path)
@@ -1287,11 +1304,13 @@ class ImageInferencePage(FunctionPage):
         def _num_key(name):
             m = re.search(r"\d+", name)
             return int(m.group()) if m else float("inf")
-        files = [os.path.join(dir_path, f) for f in sorted(names, key=_num_key)]
+        files = [
+            os.path.join(dir_path, f)
+            for f in sorted(names, key=_num_key, reverse=self.folder_sort_reverse)
+        ]
         if not files:
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
-        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
         progress_dialog = QProgressDialog("正在检测图片...", "", 0, len(files), self)
         progress_dialog.setWindowTitle("检测进度")
@@ -1309,8 +1328,12 @@ class ImageInferencePage(FunctionPage):
 
         progress_dialog.show()
         try:
+            self.folder_scan_count += 1
             rows, sample_orig, sample_ann, annotated_infos = self.run_inference(
-                files, scan_dir, progress_callback=update_progress
+                files,
+                scan_dir,
+                progress_callback=update_progress,
+                sort_reverse=self.folder_sort_reverse,
             )
             progress_dialog.setValue(len(files))
             self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
@@ -1339,8 +1362,49 @@ class ImageInferencePage(FunctionPage):
             QMessageBox.critical(self, "错误", f"发生错误: {e}")
         finally:
             progress_dialog.close()
+            self._update_sort_button_label()
 
-    def run_inference(self, files, scan_dir, progress_callback=None):
+    def toggle_folder_sort(self):
+        self.folder_sort_reverse = not self.folder_sort_reverse
+        self._update_sort_button_label()
+
+    def _update_sort_button_label(self):
+        if self.folder_sort_mode == "auto":
+            auto_reverse = self._next_auto_reverse()
+            if auto_reverse:
+                self.btn_sort_order.setText("自动顺序：下一次倒序")
+                self.btn_sort_order.setToolTip("自动模式：奇数批次正序，偶数批次倒序（下一次将倒序）")
+            else:
+                self.btn_sort_order.setText("自动顺序：下一次正序")
+                self.btn_sort_order.setToolTip("自动模式：奇数批次正序，偶数批次倒序（下一次将正序）")
+            self.btn_sort_order.setEnabled(False)
+        else:
+            if self.folder_sort_reverse:
+                self.btn_sort_order.setText("读取顺序：名称倒序")
+                self.btn_sort_order.setToolTip("按文件名倒序读取文件夹中的图片")
+            else:
+                self.btn_sort_order.setText("读取顺序：名称升序")
+                self.btn_sort_order.setToolTip("按文件名升序读取文件夹中的图片")
+            self.btn_sort_order.setEnabled(True)
+
+    def toggle_sort_mode(self):
+        self.folder_sort_mode = "auto" if self.folder_sort_mode == "manual" else "manual"
+        self._update_sort_mode_button_label()
+        self._update_sort_button_label()
+
+    def _update_sort_mode_button_label(self):
+        if self.folder_sort_mode == "auto":
+            self.btn_sort_mode.setText("顺序选择：自动")
+            self.btn_sort_mode.setToolTip("自动轮换排序：奇数批次正序，偶数批次倒序")
+        else:
+            self.btn_sort_mode.setText("顺序选择：手动")
+            self.btn_sort_mode.setToolTip("手动切换文件名顺序/倒序读取")
+
+    def _next_auto_reverse(self):
+        # 奇数批次正序，偶数批次倒序；计数从1开始
+        return (self.folder_scan_count + 1) % 2 == 0
+
+    def run_inference(self, files, scan_dir, progress_callback=None, sort_reverse=False):
         # 为每次批量扫描创建全新的模型实例，确保跟踪器状态绝对独立
         model_for_batch = YOLO(self.main_window.model_weight_path)
 
@@ -1352,6 +1416,7 @@ class ImageInferencePage(FunctionPage):
             key=lambda p: int(re.search(r"\d+", os.path.basename(p)).group())
             if re.search(r"\d+", os.path.basename(p))
             else float("inf"),
+            reverse=sort_reverse,
         )
         total = len(files)
         if progress_callback:
