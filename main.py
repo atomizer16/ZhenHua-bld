@@ -1499,7 +1499,14 @@ class ImageInferencePage(FunctionPage):
             html.append(
                 "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图像</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
             )
+
+            # 每个螺栓 ID 只保留一次，避免跨帧重复出现在 HTML 报告
+            unique_rows = {}
             for r in rows:
+                if r["bolt_id"] not in unique_rows:
+                    unique_rows[r["bolt_id"]] = r
+
+            for r in unique_rows.values():
                 html.append(
                     f"<tr><td>{r['image']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
                 )
