@@ -1341,8 +1341,11 @@ class ImageInferencePage(FunctionPage):
             progress_dialog.close()
 
     def run_inference(self, files, scan_dir, progress_callback=None):
+        # 为每次批量扫描创建全新的模型实例，确保跟踪器状态绝对独立
+        model_for_batch = YOLO(self.main_window.model_weight_path)
+
         # 确保每次批量检测前重置跟踪器，避免上一功能的 ID 计数影响本次结果
-        reset_tracker_state(self.model)
+        reset_tracker_state(model_for_batch)
 
         files = sorted(
             files,
@@ -1353,7 +1356,7 @@ class ImageInferencePage(FunctionPage):
         total = len(files)
         if progress_callback:
             progress_callback(0, total)
-        results_gen = self.model.track(
+        results_gen = model_for_batch.track(
             source=files,
             conf=self.conf_thres,
             device=self.device_option,
@@ -1453,11 +1456,14 @@ class ImageInferencePage(FunctionPage):
             if progress_callback:
                 progress_callback(idx + 1, total)
 
-        if hasattr(self.model, "tracker") and self.model.tracker is not None:
+        if hasattr(model_for_batch, "tracker") and model_for_batch.tracker is not None:
             try:
-                self.model.tracker.tracker.reset()
+                model_for_batch.tracker.tracker.reset()
             except Exception:
                 pass
+
+        # 主动释放本次推理专用的模型实例，彻底断开与上一批次的状态关联
+        del model_for_batch
 
         self.text_detail.setPlainText("\n".join(detail_lines))
         return rows, sample_orig, sample_ann, annotated_infos
