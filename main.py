@@ -34,6 +34,8 @@ else:
 
 # 用户数据文件路径
 USER_DATA_FILE = os.path.join(BASE_DIR, "users.json")
+CAMERA_POSITION_MAP_FILE = os.path.join(BASE_DIR, "camera_position_map.json")
+
 
 def hash_password(password):
     """生成密码哈希"""
@@ -140,15 +142,148 @@ def get_motherboard_serial():
     return f"FALLBACK_UNAVAILABLE_{system_name.upper()}_{fallback_id}"
 
 
-def build_scan_metadata(scan_type):
+def load_camera_position_map():
+    if not os.path.exists(CAMERA_POSITION_MAP_FILE):
+        return {}
+    try:
+        with open(CAMERA_POSITION_MAP_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items() if str(v) in {"left", "right"}}
+    except Exception:
+        pass
+    return {}
+
+
+def save_camera_position_map(mapping):
+    normalized = {str(k): str(v) for k, v in mapping.items() if str(v) in {"left", "right"}}
+    with open(CAMERA_POSITION_MAP_FILE, "w", encoding="utf-8") as f:
+        json.dump(normalized, f, ensure_ascii=False, indent=2)
+
+
+def _sanitize_camera_token(value):
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    return value.strip("_")
+
+
+def _normalize_camera_serial(value):
+    value = str(value or "").strip()
+    invalid_values = {"", "none", "unknown", "n/a", "null"}
+    if value.lower() in invalid_values:
+        return ""
+    return value
+
+
+def _read_device_properties_linux(device_path):
+    output = _read_command_output(["udevadm", "info", "--query=property", "--name", device_path])
+    properties = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        properties[key.strip()] = value.strip()
+    return properties
+
+
+def get_camera_metadata(camera_index):
+    metadata = {
+        "camera_index": camera_index,
+        "camera_serial": "",
+        "vendor": "Generic",
+        "model": f"Camera {camera_index}",
+        "display_name": f"Camera {camera_index}",
+        "serial_source": "unavailable",
+        "is_limited_fallback": True,
+        "warning": "未读取到稳定序列号，仅适合临时调试，不适合正式归档。",
+    }
+
+    system_name = platform.system().lower()
+    if system_name == "linux":
+        device_path = f"/dev/video{camera_index}"
+        props = _read_device_properties_linux(device_path)
+        vendor = props.get("ID_VENDOR_FROM_DATABASE") or props.get("ID_VENDOR") or props.get("ID_VENDOR_ID") or metadata["vendor"]
+        model = props.get("ID_MODEL_FROM_DATABASE") or props.get("ID_MODEL") or metadata["model"]
+        serial = _normalize_camera_serial(props.get("ID_SERIAL_SHORT") or props.get("ID_SERIAL"))
+        metadata.update({
+            "vendor": vendor,
+            "model": model,
+            "display_name": f"{vendor} {model}".strip(),
+        })
+        if serial:
+            metadata["camera_serial"] = serial
+            metadata["serial_source"] = "udevadm"
+            metadata["is_limited_fallback"] = False
+            metadata["warning"] = ""
+    elif system_name == "windows":
+        metadata.update({
+            "vendor": "USB",
+            "model": f"USB Camera {camera_index}",
+            "display_name": f"USB Camera {camera_index}",
+            "warning": "当前环境未提供稳定的 Windows 相机序列号读取能力，将使用受限 fallback，不适合正式归档。",
+        })
+    else:
+        metadata["warning"] = f"当前平台（{system_name}）未实现稳定序列号读取，将使用受限 fallback，不适合正式归档。"
+
+    if metadata["camera_serial"]:
+        metadata["camera_identity"] = metadata["camera_serial"]
+    else:
+        fallback_key = "USB_FALLBACK_{index}_{vendor}_{model}".format(
+            index=camera_index,
+            vendor=_sanitize_camera_token(metadata.get("vendor", "generic")),
+            model=_sanitize_camera_token(metadata.get("model", f"camera_{camera_index}")),
+        )
+        metadata["camera_identity"] = fallback_key
+    return metadata
+
+
+def open_camera_device(preferred_index=None, max_indices=5):
+    indices = []
+    if preferred_index is not None:
+        indices.append(int(preferred_index))
+    indices.extend(idx for idx in range(max_indices) if idx not in indices)
+
+    last_error = ""
+    for camera_index in indices:
+        try:
+            cap = cv2.VideoCapture(camera_index)
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+        if cap is None or not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            continue
+
+        metadata = get_camera_metadata(camera_index)
+        metadata["backend_name"] = getattr(cap, "getBackendName", lambda: "unknown")()
+        return {
+            "capture": cap,
+            "camera_index": camera_index,
+            "camera_serial": metadata.get("camera_serial", ""),
+            "vendor": metadata.get("vendor", "Generic"),
+            "model": metadata.get("model", f"Camera {camera_index}"),
+            "camera_identity": metadata.get("camera_identity", ""),
+            "metadata": metadata,
+        }
+
+    raise RuntimeError(last_error or "无法打开摄像头，请检查设备连接。")
+
+
+def build_scan_metadata(scan_type, extra_metadata=None):
     serial = get_motherboard_serial()
     timestamp = datetime.datetime.now().isoformat(timespec="seconds")
-    return {
+    metadata = {
         "device_id": serial,
         "motherboard_serial": serial,
         "scan_time": timestamp,
         "scan_type": scan_type,
     }
+    if extra_metadata:
+        for key, value in extra_metadata.items():
+            metadata[key] = value
+    return metadata
 
 
 def write_id_file(scan_dir_or_text_part, metadata):
@@ -169,8 +304,8 @@ def write_id_file(scan_dir_or_text_part, metadata):
     return id_path
 
 
-def refresh_scan_id(scan_layout, scan_type):
-    metadata = build_scan_metadata(scan_type)
+def refresh_scan_id(scan_layout, scan_type, extra_metadata=None):
+    metadata = build_scan_metadata(scan_type, extra_metadata=extra_metadata)
     write_id_file(scan_layout.get("text_part") or scan_layout.get("scan_dir") or "", metadata)
     return metadata
 
@@ -926,6 +1061,7 @@ class CameraCaptureThread(QThread):
         device_option,
         save_root_dir,
         capture_mode="video",
+        camera_context=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -934,6 +1070,7 @@ class CameraCaptureThread(QThread):
         self.device_option = device_option
         self.save_root_dir = save_root_dir
         self.capture_mode  = capture_mode if capture_mode in {"video", "images"} else "video"
+        self.camera_context = dict(camera_context or {})
 
         self.scan_layout = create_scan_layout(self.save_root_dir, "c")
         self.scan_dir = self.scan_layout["scan_dir"]
@@ -946,19 +1083,20 @@ class CameraCaptureThread(QThread):
 
         self.video_path   = os.path.join(self.scan_layout["raw_part"], f"Video_{self.scan_timestamp}.mp4")
         self.saved_frames = []
-        self.scan_metadata = refresh_scan_id(self.scan_layout, "c")
+        self.scan_metadata = refresh_scan_id(self.scan_layout, "c", extra_metadata=self.camera_context)
         self._running     = True
 
     def run(self):
-        self.scan_metadata = refresh_scan_id(self.scan_layout, "c")
+        self.scan_metadata = refresh_scan_id(self.scan_layout, "c", extra_metadata=self.camera_context)
         try:
-            cap = cv2.VideoCapture(0)
+            camera_info = open_camera_device(self.camera_context.get("camera_index"))
+            cap = camera_info["capture"]
+            runtime_context = dict(camera_info.get("metadata") or {})
+            runtime_context["camera_position"] = self.camera_context.get("camera_position", "")
+            self.camera_context.update(runtime_context)
+            self.scan_metadata = refresh_scan_id(self.scan_layout, "c", extra_metadata=self.camera_context)
         except Exception as e:
             self.error_signal.emit(f"摄像头打开失败：{e}")
-            return
-
-        if not cap.isOpened():
-            self.error_signal.emit("无法打开摄像头，请检查设备连接。")
             return
 
         writer = None
@@ -1013,6 +1151,7 @@ class CameraCaptureThread(QThread):
             "video_path": self.video_path if self.capture_mode == "video" and success else "",
             "frames": list(self.saved_frames),
             "message": "" if success else "摄像头未捕获到有效画面。",
+            "camera_context": dict(self.camera_context),
         }
         self.finished_signal.emit(info)
 
@@ -2033,6 +2172,10 @@ class CameraPage(FunctionPage):
             f"border-radius: {UITheme.CONTROL_RADIUS}px;"
         )
         preview_layout.addWidget(self.label_cam)
+        self.camera_status = QLabel("未开始检测。")
+        self.camera_status.setWordWrap(True)
+        self.camera_status.setStyleSheet(f"color: {UITheme.COLOR_TEXT_MUTED};")
+        preview_layout.addWidget(self.camera_status)
 
         history_card, history_layout = create_section_card(
             "最近摄像头批次",
@@ -2048,15 +2191,69 @@ class CameraPage(FunctionPage):
             ],
         )
 
+    def resolve_camera_context(self):
+        camera_info = open_camera_device()
+        cap = camera_info.get("capture")
+        if cap is not None:
+            cap.release()
+
+        metadata = dict(camera_info.get("metadata") or {})
+        camera_identity = metadata.get("camera_identity", "")
+        camera_map = load_camera_position_map()
+        camera_position = camera_map.get(camera_identity, "")
+
+        if not camera_position:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("绑定相机位置")
+            msg.setIcon(QMessageBox.Question)
+            serial_text = metadata.get("camera_serial") or "未读取到稳定序列号（受限 fallback）"
+            msg.setText(
+                "检测到未登记的摄像头，请选择其归属位置后继续。\n"
+                f"序列号：{serial_text}\n"
+                f"厂商/型号：{metadata.get('vendor', 'Generic')} / {metadata.get('model', 'Unknown')}"
+            )
+            if metadata.get("warning"):
+                msg.setInformativeText(metadata["warning"])
+            left_btn = msg.addButton("左相机", QMessageBox.AcceptRole)
+            right_btn = msg.addButton("右相机", QMessageBox.AcceptRole)
+            cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+            msg.exec_()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return None
+            camera_position = "left" if clicked == left_btn else "right"
+            camera_map[camera_identity] = camera_position
+            save_camera_position_map(camera_map)
+
+        metadata["camera_position"] = camera_position
+        return metadata
+
     def start_camera(self):
         if self.thread:
             self.stop_camera()
+        try:
+            camera_context = self.resolve_camera_context()
+        except Exception as e:
+            QMessageBox.critical(self, "摄像头错误", f"摄像头初始化失败：{e}")
+            return
+        if not camera_context:
+            return
+
+        warning_text = camera_context.get("warning", "")
+        serial_text = camera_context.get("camera_serial") or "无稳定序列号（fallback）"
+        self.camera_status.setText(
+            f"当前设备：{camera_context.get('vendor', 'Generic')} / {camera_context.get('model', 'Unknown')} | "
+            f"serial={serial_text} | position={camera_context.get('camera_position', '')}"
+            + (f"\n提示：{warning_text}" if warning_text else "")
+        )
+
         self.thread = CameraCaptureThread(
             self.model,
             self.conf_thres,
             self.device_option,
             self.main_window.save_root_dir,
             capture_mode=self.capture_mode,
+            camera_context=camera_context,
         )
         self.thread.frame_signal.connect(self.update_frame)
         self.thread.finished_signal.connect(self.handle_capture_finished)
@@ -2083,6 +2280,7 @@ class CameraPage(FunctionPage):
         self.thread = None
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.camera_status.setText(message)
 
     def handle_capture_finished(self, info):
         self.thread = None
@@ -2108,7 +2306,7 @@ class CameraPage(FunctionPage):
         if not scan_layout:
             scan_layout = ensure_scan_layout(scan_dir)
 
-        refresh_scan_id(scan_layout, "c")
+        refresh_scan_id(scan_layout, "c", extra_metadata=info.get("camera_context"))
         progress_dialog = None
 
         if info.get("mode") == "images":
