@@ -10,6 +10,10 @@ import io
 import re
 import datetime
 import math
+import subprocess
+import platform
+import uuid
+from pathlib import Path
 import cv2
 from PIL import Image
 import shutil
@@ -83,6 +87,93 @@ def reset_tracker_state(model):
     except Exception:
         # 重置失败不阻塞主流程
         pass
+
+def _read_command_output(command):
+    try:
+        output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True)
+        return output.strip()
+    except Exception:
+        return ""
+
+
+def get_motherboard_serial():
+    """按平台读取主板序列号，失败时返回带原因的 fallback 标志。"""
+    system_name = platform.system().lower()
+    candidates = []
+
+    if system_name == "windows":
+        output = _read_command_output(["wmic", "baseboard", "get", "serialnumber"])
+        for line in output.splitlines():
+            value = line.strip()
+            if value and value.lower() != "serialnumber":
+                candidates.append(value)
+    elif system_name == "linux":
+        for serial_path in (
+            "/sys/class/dmi/id/board_serial",
+            "/sys/devices/virtual/dmi/id/board_serial",
+            "/sys/class/dmi/id/product_serial",
+        ):
+            try:
+                if os.path.exists(serial_path):
+                    value = Path(serial_path).read_text(encoding="utf-8", errors="ignore").strip()
+                    if value:
+                        candidates.append(value)
+            except Exception:
+                continue
+        if not candidates:
+            output = _read_command_output(["dmidecode", "-s", "baseboard-serial-number"])
+            if output:
+                candidates.extend([line.strip() for line in output.splitlines() if line.strip()])
+    elif system_name == "darwin":
+        output = _read_command_output(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"])
+        match = re.search(r'"IOPlatformSerialNumber"\s*=\s*"([^"]+)"', output)
+        if match:
+            candidates.append(match.group(1).strip())
+
+    invalid_values = {"", "none", "unknown", "system serial number", "to be filled by o.e.m.", "default string"}
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if normalized and normalized.lower() not in invalid_values:
+            return normalized
+
+    fallback_id = hex(uuid.getnode())[2:].upper() or "UNKNOWN"
+    return f"FALLBACK_UNAVAILABLE_{system_name.upper()}_{fallback_id}"
+
+
+def build_scan_metadata(scan_type):
+    serial = get_motherboard_serial()
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    return {
+        "device_id": serial,
+        "motherboard_serial": serial,
+        "scan_time": timestamp,
+        "scan_type": scan_type,
+    }
+
+
+def write_id_file(scan_dir_or_text_part, metadata):
+    target_dir = scan_dir_or_text_part
+    if os.path.basename(os.path.normpath(scan_dir_or_text_part)) != "text_part":
+        target_dir = os.path.join(scan_dir_or_text_part, "text_part")
+    os.makedirs(target_dir, exist_ok=True)
+    id_path = os.path.join(target_dir, "ID.TXT")
+    lines = []
+    for key in ("device_id", "motherboard_serial", "scan_time", "scan_type"):
+        value = metadata.get(key, "")
+        lines.append(f"{key}={value}")
+    for key, value in metadata.items():
+        if key not in {"device_id", "motherboard_serial", "scan_time", "scan_type"}:
+            lines.append(f"{key}={value}")
+    with open(id_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return id_path
+
+
+def refresh_scan_id(scan_layout, scan_type):
+    metadata = build_scan_metadata(scan_type)
+    write_id_file(scan_layout.get("text_part") or scan_layout.get("scan_dir") or "", metadata)
+    return metadata
+
 
 # —— 资源路径统一管理 ——
 CRANE_IMAGE_PATH = os.path.join(BASE_DIR, "crane.jpg")
@@ -855,9 +946,11 @@ class CameraCaptureThread(QThread):
 
         self.video_path   = os.path.join(self.scan_layout["raw_part"], f"Video_{self.scan_timestamp}.mp4")
         self.saved_frames = []
+        self.scan_metadata = refresh_scan_id(self.scan_layout, "c")
         self._running     = True
 
     def run(self):
+        self.scan_metadata = refresh_scan_id(self.scan_layout, "c")
         try:
             cap = cv2.VideoCapture(0)
         except Exception as e:
@@ -1293,6 +1386,7 @@ class ImageInferencePage(FunctionPage):
         if not fp:
             return
         scan_layout = create_scan_layout(self.main_window.save_root_dir, "p")
+        refresh_scan_id(scan_layout, "p")
         scan_dir = scan_layout["scan_dir"]
         try:
             rows, sample_orig, sample_ann, annotated_infos = self.run_inference([fp], scan_layout)
@@ -1342,6 +1436,7 @@ class ImageInferencePage(FunctionPage):
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
         scan_layout = create_scan_layout(self.main_window.save_root_dir, "p")
+        refresh_scan_id(scan_layout, "p")
         scan_dir = scan_layout["scan_dir"]
         progress_dialog = QProgressDialog("正在检测图片...", "", 0, len(files), self)
         progress_dialog.setWindowTitle("检测进度")
@@ -1637,6 +1732,7 @@ class VideoInferencePage(FunctionPage):
         self.device_option = device_option
         self.thread        = None
         self.out_path      = ""
+        self.current_scan_layout = None
         self.set_header_actions(build_vision_mode_actions(self.main_window, "video"))
         self.initUI()
 
@@ -1704,6 +1800,8 @@ class VideoInferencePage(FunctionPage):
             return
         self.info.setText(f"已选择视频: {os.path.basename(fp)}，开始推理…")
         self.bar.setValue(0)
+        self.current_scan_layout = create_scan_layout(self.main_window.save_root_dir, "v")
+        refresh_scan_id(self.current_scan_layout, "v")
         # 启动视频处理线程
         self.thread = VideoProcessingThread(
             fp, self.model, self.conf_thres, self.device_option
@@ -1777,7 +1875,8 @@ class VideoInferencePage(FunctionPage):
                 QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
 
         # ========= 2. 自动批次归档 =========
-            scan_layout = create_scan_layout(self.main_window.save_root_dir, "v")
+            scan_layout = self.current_scan_layout or create_scan_layout(self.main_window.save_root_dir, "v")
+            refresh_scan_id(scan_layout, "v")
             scan_dir = scan_layout["scan_dir"]
 
         # 导出CSV（所有检测数据）
@@ -2009,6 +2108,7 @@ class CameraPage(FunctionPage):
         if not scan_layout:
             scan_layout = ensure_scan_layout(scan_dir)
 
+        refresh_scan_id(scan_layout, "c")
         progress_dialog = None
 
         if info.get("mode") == "images":
