@@ -844,7 +844,8 @@ class CameraCaptureThread(QThread):
         self.save_root_dir = save_root_dir
         self.capture_mode  = capture_mode if capture_mode in {"video", "images"} else "video"
 
-        self.scan_dir = make_scan_dir(self.save_root_dir, "c")
+        self.scan_layout = create_scan_layout(self.save_root_dir, "c")
+        self.scan_dir = self.scan_layout["scan_dir"]
         base_name     = os.path.basename(self.scan_dir)
         parts         = base_name.split("_")
         if len(parts) >= 3:
@@ -852,7 +853,7 @@ class CameraCaptureThread(QThread):
         else:
             self.scan_timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        self.video_path   = os.path.join(self.scan_dir, f"Video_{self.scan_timestamp}.mp4")
+        self.video_path   = os.path.join(self.scan_layout["raw_part"], f"Video_{self.scan_timestamp}.mp4")
         self.saved_frames = []
         self._running     = True
 
@@ -896,7 +897,7 @@ class CameraCaptureThread(QThread):
                     writer.write(frame)
                 else:
                     frame_index += 1
-                    img_path = os.path.join(self.scan_dir, f"Image{frame_index}.jpg")
+                    img_path = os.path.join(self.scan_layout["raw_part"], f"Image{frame_index}.jpg")
                     if cv2.imwrite(img_path, frame):
                         self.saved_frames.append(img_path)
 
@@ -914,6 +915,7 @@ class CameraCaptureThread(QThread):
         info = {
             "success": success,
             "scan_dir": self.scan_dir,
+            "scan_layout": dict(self.scan_layout),
             "mode": self.capture_mode,
             "video_path": self.video_path if self.capture_mode == "video" and success else "",
             "frames": list(self.saved_frames),
@@ -936,12 +938,39 @@ def pil_to_pixmap(pil_img):
     qimg = QImage(data, w, h, w*3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
 
-def make_scan_dir(save_root_dir, suffix):
+def create_scan_layout(save_root_dir, suffix):
     now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     folder = f"scan_{now}_{suffix}"
     scan_dir = os.path.join(save_root_dir, folder)
-    os.makedirs(scan_dir, exist_ok=True)
-    return scan_dir
+    image_part = os.path.join(scan_dir, "image_part")
+    raw_part = os.path.join(scan_dir, "raw_part")
+    text_part = os.path.join(scan_dir, "text_part")
+    for dir_path in (scan_dir, image_part, raw_part, text_part):
+        os.makedirs(dir_path, exist_ok=True)
+    return {
+        "scan_dir": scan_dir,
+        "image_part": image_part,
+        "raw_part": raw_part,
+        "text_part": text_part,
+    }
+
+
+def ensure_scan_layout(scan_dir):
+    image_part = os.path.join(scan_dir, "image_part")
+    raw_part = os.path.join(scan_dir, "raw_part")
+    text_part = os.path.join(scan_dir, "text_part")
+    for dir_path in (scan_dir, image_part, raw_part, text_part):
+        os.makedirs(dir_path, exist_ok=True)
+    return {
+        "scan_dir": scan_dir,
+        "image_part": image_part,
+        "raw_part": raw_part,
+        "text_part": text_part,
+    }
+
+
+def make_scan_dir(save_root_dir, suffix):
+    return create_scan_layout(save_root_dir, suffix)["scan_dir"]
 
 def get_all_batches(save_root_dir):
     """
@@ -1263,10 +1292,11 @@ class ImageInferencePage(FunctionPage):
         )
         if not fp:
             return
-        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        scan_layout = create_scan_layout(self.main_window.save_root_dir, "p")
+        scan_dir = scan_layout["scan_dir"]
         try:
-            rows, sample_orig, sample_ann, annotated_infos = self.run_inference([fp], scan_dir)
-            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
+            rows, sample_orig, sample_ann, annotated_infos = self.run_inference([fp], scan_layout)
+            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
             self.history_list.refresh()
             QMessageBox.information(
                 self, "检测结果归档完成", f"本次检测所有结果已保存到：\n{scan_dir}"
@@ -1311,7 +1341,8 @@ class ImageInferencePage(FunctionPage):
         if not files:
             QMessageBox.warning(self, "警告", "该文件夹内未找到图片")
             return
-        scan_dir = make_scan_dir(self.main_window.save_root_dir, "p")
+        scan_layout = create_scan_layout(self.main_window.save_root_dir, "p")
+        scan_dir = scan_layout["scan_dir"]
         progress_dialog = QProgressDialog("正在检测图片...", "", 0, len(files), self)
         progress_dialog.setWindowTitle("检测进度")
         progress_dialog.setCancelButton(None)
@@ -1331,12 +1362,12 @@ class ImageInferencePage(FunctionPage):
             self.folder_scan_count += 1
             rows, sample_orig, sample_ann, annotated_infos = self.run_inference(
                 files,
-                scan_dir,
+                scan_layout,
                 progress_callback=update_progress,
                 sort_reverse=self.folder_sort_reverse,
             )
             progress_dialog.setValue(len(files))
-            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_dir)
+            self.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
             self.history_list.refresh()
             QMessageBox.information(
                 self,
@@ -1404,7 +1435,9 @@ class ImageInferencePage(FunctionPage):
         # 奇数批次正序，偶数批次倒序；计数从1开始
         return (self.folder_scan_count + 1) % 2 == 0
 
-    def run_inference(self, files, scan_dir, progress_callback=None, sort_reverse=False):
+    def run_inference(self, files, scan_layout, progress_callback=None, sort_reverse=False):
+        image_part = scan_layout["image_part"]
+        raw_part = scan_layout["raw_part"]
         # 为每次批量扫描创建全新的模型实例，确保跟踪器状态绝对独立
         model_for_batch = YOLO(self.main_window.model_weight_path)
 
@@ -1443,6 +1476,13 @@ class ImageInferencePage(FunctionPage):
             ann_bgr = res.plot()
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
 
+            try:
+                raw_path = os.path.join(raw_part, os.path.basename(fp))
+                if os.path.abspath(fp) != os.path.abspath(raw_path):
+                    shutil.copy2(fp, raw_path)
+            except Exception:
+                pass
+
             # 保存带检测框的图像
             ann_path = None
             try:
@@ -1451,7 +1491,7 @@ class ImageInferencePage(FunctionPage):
                 if not ext:
                     ext = ".jpg"
                 ann_filename = f"{stem}_det{ext}"
-                ann_path = os.path.join(scan_dir, ann_filename)
+                ann_path = os.path.join(image_part, ann_filename)
                 success = cv2.imwrite(ann_path, ann_bgr)
                 if not success:
                     ann_path = None
@@ -1533,11 +1573,12 @@ class ImageInferencePage(FunctionPage):
         self.text_detail.setPlainText("\n".join(detail_lines))
         return rows, sample_orig, sample_ann, annotated_infos
 
-    def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_dir):
+    def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_layout):
+        text_part = scan_layout["text_part"]
         try:
             cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
             pd.DataFrame(rows, columns=cols).to_csv(
-                os.path.join(scan_dir, "bolt_detection_result.csv"), index=False
+                os.path.join(text_part, "bolt_detection_result.csv"), index=False
             )
         except Exception as e:
             QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
@@ -1576,7 +1617,7 @@ class ImageInferencePage(FunctionPage):
                     f"<tr><td>{r['image']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
                 )
             html.append("</table></body></html>")
-            report_path = os.path.join(scan_dir, "bolt_detection_report.html")
+            report_path = os.path.join(text_part, "bolt_detection_report.html")
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(html))
         except Exception as e:
@@ -1736,23 +1777,24 @@ class VideoInferencePage(FunctionPage):
                 QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
 
         # ========= 2. 自动批次归档 =========
-            scan_dir = make_scan_dir(self.main_window.save_root_dir, "v")
+            scan_layout = create_scan_layout(self.main_window.save_root_dir, "v")
+            scan_dir = scan_layout["scan_dir"]
 
         # 导出CSV（所有检测数据）
             if hasattr(self.thread, "frame_records"):
-                csv_path = os.path.join(scan_dir, "bolt_detection_result.csv")
+                csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
                 pd.DataFrame(self.thread.frame_records).to_csv(csv_path, index=False)
 
         # 导出松动关键帧图片
             loose_frames = getattr(self.thread, "loose_frames", [])
             for img, bolt_id, frame_idx in loose_frames:
                 img_path = os.path.join(
-                    scan_dir, f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
+                    scan_layout["raw_part"], f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
                 )
                 cv2.imwrite(img_path, img)
 
         # 复制视频
-            video_dst = os.path.join(scan_dir, "temp_output_video.mp4")
+            video_dst = os.path.join(scan_layout["raw_part"], "temp_output_video.mp4")
             try:
                 shutil.copy(path, video_dst)
             except Exception as e:
@@ -1763,7 +1805,7 @@ class VideoInferencePage(FunctionPage):
                 try:
                     shutil.copy(
                         report_path,
-                        os.path.join(scan_dir, os.path.basename(report_path))
+                        os.path.join(scan_layout["text_part"], os.path.basename(report_path))
                     )
                 except Exception as e:
                     QMessageBox.warning(self, "拷贝报告失败", f"报告复制失败: {e}")
@@ -1958,13 +2000,14 @@ class CameraPage(FunctionPage):
             QMessageBox.critical(self, "错误", f"检测处理失败: {e}")
 
     def run_post_detection(self, info):
-        scan_dir = info.get("scan_dir")
+        scan_layout = info.get("scan_layout") or {}
+        scan_dir = scan_layout.get("scan_dir") or info.get("scan_dir")
         if not scan_dir or not os.path.isdir(scan_dir):
             QMessageBox.warning(self, "提示", "未找到有效的扫描目录。")
             return
 
-        result_dir = os.path.join(scan_dir, "result")
-        os.makedirs(result_dir, exist_ok=True)
+        if not scan_layout:
+            scan_layout = ensure_scan_layout(scan_dir)
 
         progress_dialog = None
 
@@ -1998,19 +2041,19 @@ class CameraPage(FunctionPage):
             image_page = self.main_window.page_image
             try:
                 rows, sample_orig, sample_ann, annotated_infos = image_page.run_inference(
-                    image_paths, result_dir, progress_callback=update_image_progress
+                    image_paths, scan_layout, progress_callback=update_image_progress
                 )
                 progress_dialog.setValue(len(image_paths))
             finally:
                 progress_dialog.close()
                 progress_dialog = None
 
-            image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, result_dir)
+            image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
                 cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
                 pd.DataFrame(rows, columns=cols).to_excel(
-                    os.path.join(result_dir, "bolt_detection_result.csv"),
+                    os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
                 )
             except Exception:
@@ -2019,7 +2062,7 @@ class CameraPage(FunctionPage):
             QMessageBox.information(
                 self,
                 "检测完成",
-                f"摄像头检测已完成，结果保存在：\n{result_dir}",
+                f"摄像头检测已完成，结果保存在：\n{scan_dir}",
             )
 
         else:
@@ -2061,13 +2104,13 @@ class CameraPage(FunctionPage):
             dest_video_path = ""
             if os.path.exists(processed_src):
                 base_name = os.path.splitext(os.path.basename(video_path))[0]
-                dest_video_path = os.path.join(result_dir, f"{base_name}_det.mp4")
+                dest_video_path = os.path.join(scan_layout["image_part"], f"{base_name}_det.mp4")
                 try:
                     if os.path.exists(dest_video_path):
                         os.remove(dest_video_path)
                     shutil.move(processed_src, dest_video_path)
                 except Exception:
-                    dest_video_path = os.path.join(result_dir, os.path.basename(processed_src))
+                    dest_video_path = os.path.join(scan_layout["image_part"], os.path.basename(processed_src))
                     try:
                         if os.path.exists(dest_video_path):
                             os.remove(dest_video_path)
@@ -2087,21 +2130,21 @@ class CameraPage(FunctionPage):
 
             df = df.reindex(columns=columns)
 
-            csv_path = os.path.join(result_dir, "bolt_detection_result.csv")
+            csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
             df.to_csv(csv_path, index=False)
 
             for img, bolt_id, frame_idx in getattr(thread, "loose_frames", []):
                 try:
                     cv2.imwrite(
                         os.path.join(
-                            result_dir, f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
+                            scan_layout["raw_part"], f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
                         ),
                         img,
                     )
                 except Exception:
                     pass
 
-            report_path = os.path.join(result_dir, "video_detection_report.html")
+            report_path = os.path.join(scan_layout["text_part"], "video_detection_report.html")
             try:
                 html = []
                 html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
@@ -2153,7 +2196,7 @@ class CameraPage(FunctionPage):
             QMessageBox.information(
                 self,
                 "检测完成",
-                f"摄像头检测已完成，结果保存在：\n{result_dir}",
+                f"摄像头检测已完成，结果保存在：\n{scan_dir}",
             )
 
         self.history_list.refresh()
