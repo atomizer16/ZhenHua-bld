@@ -940,7 +940,8 @@ class VideoProcessingThread(QThread):
         self.first_frame_ann  = None
 
         self.frame_records = []   # 记录每帧所有螺栓的检测结果
-        self.loose_frames = []   # [(frame_image, bolt_id, frame_idx)]
+        self.export_frames = []  # [{frame_id, raw_frame, ann_frame, frame_idx, bolt_id}]
+        self._exported_frame_indexes = set()
 
     def run(self):
         # 每次视频推理前强制清空跟踪器状态，保证 ID 从 1 开始
@@ -1009,7 +1010,9 @@ class VideoProcessingThread(QThread):
                 conf = float(box.conf[0]) if box.conf is not None else 0.0
 
                 # 收集所有检测数据（frame, bolt_id, status, conf）
+                frame_name = build_frame_name(idx_frame)
                 self.frame_records.append({
+                    "图片ID": frame_name["id"],
                     "frame": idx_frame,
                     "bolt_id": stable_id,
                     "status": cname,
@@ -1017,11 +1020,18 @@ class VideoProcessingThread(QThread):
                 })
 
                 # 如果是"松动"螺栓，则收集关键帧（确保仅保存每个螺栓的首帧或全部帧，可按需改动）
-                if cname.lower() == "loose":  # 注意"loose"应与你模型类别一致
+                if cname.lower() == "loose" and idx_frame not in self._exported_frame_indexes:  # 注意"loose"应与你模型类别一致
                     ann_bgr = result.plot(img=frame_bgr.copy())
-                    self.loose_frames.append(
-                        (ann_bgr.copy(), stable_id, idx_frame)
+                    self.export_frames.append(
+                        {
+                            "图片ID": frame_name["id"],
+                            "frame_idx": idx_frame,
+                            "bolt_id": stable_id,
+                            "raw_frame": frame_bgr.copy(),
+                            "ann_frame": ann_bgr.copy(),
+                        }
                     )
+                    self._exported_frame_indexes.add(idx_frame)
 
             # --- 首帧保存用于报告 ---
             if idx_frame == 1:
@@ -1128,7 +1138,7 @@ class CameraCaptureThread(QThread):
                     writer.write(frame)
                 else:
                     frame_index += 1
-                    img_path = os.path.join(self.scan_layout["raw_part"], f"Image{frame_index}.jpg")
+                    img_path = os.path.join(self.scan_layout["raw_part"], build_image_name(frame_index)["raw_filename"])
                     if cv2.imwrite(img_path, frame):
                         self.saved_frames.append(img_path)
 
@@ -1200,6 +1210,27 @@ def ensure_scan_layout(scan_dir):
         "text_part": text_part,
     }
 
+
+
+
+def build_media_name(prefix, index, *, raw_ext=".jpg", det_suffix="_det", det_ext=None):
+    raw_ext = raw_ext if raw_ext.startswith(".") else f".{raw_ext}"
+    det_ext = det_ext or raw_ext
+    det_ext = det_ext if det_ext.startswith(".") else f".{det_ext}"
+    media_id = f"{prefix}{index}"
+    return {
+        "id": media_id,
+        "raw_filename": f"{media_id}{raw_ext}",
+        "det_filename": f"{media_id}{det_suffix}{det_ext}",
+    }
+
+
+def build_image_name(index, *, raw_ext=".jpg", det_ext=None):
+    return build_media_name("IMAGE", index, raw_ext=raw_ext, det_suffix="_DET", det_ext=det_ext)
+
+
+def build_frame_name(index, *, raw_ext=".jpg", det_ext=None):
+    return build_media_name("frame", index, raw_ext=raw_ext, det_suffix="_det", det_ext=det_ext)
 
 def make_scan_dir(save_root_dir, suffix):
     return create_scan_layout(save_root_dir, suffix)["scan_dir"]
@@ -1705,35 +1736,37 @@ class ImageInferencePage(FunctionPage):
         detail_lines = []
         annotated_infos = []  # [(source_name, annotated_path)]
 
-        for idx, (fp, res) in enumerate(zip(files, results_gen)):
+        for idx, (fp, res) in enumerate(zip(files, results_gen), start=1):
             orig_bgr = res.orig_img
             ann_bgr = res.plot()
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
+            image_name = build_image_name(idx)
+            image_id = image_name["id"]
 
             try:
-                raw_path = os.path.join(raw_part, os.path.basename(fp))
-                if os.path.abspath(fp) != os.path.abspath(raw_path):
+                raw_path = os.path.join(raw_part, image_name["raw_filename"])
+                ext = os.path.splitext(fp)[1].lower() if fp else ""
+                if os.path.abspath(fp) == os.path.abspath(raw_path):
+                    pass
+                elif ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
                     shutil.copy2(fp, raw_path)
+                else:
+                    cv2.imwrite(raw_path, orig_bgr)
             except Exception:
                 pass
 
             # 保存带检测框的图像
             ann_path = None
             try:
-                base_name = os.path.basename(fp)
-                stem, ext = os.path.splitext(base_name)
-                if not ext:
-                    ext = ".jpg"
-                ann_filename = f"{stem}_det{ext}"
-                ann_path = os.path.join(image_part, ann_filename)
+                ann_path = os.path.join(image_part, image_name["det_filename"])
                 success = cv2.imwrite(ann_path, ann_bgr)
                 if not success:
                     ann_path = None
             except Exception:
                 ann_path = None
-            annotated_infos.append((os.path.basename(fp), ann_path))
+            annotated_infos.append((image_id, ann_path))
 
-            if idx == 0:
+            if idx == 1:
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
                 sample_ann = Image.fromarray(ann_rgb)
                 w0, h0 = sample_orig.size
@@ -1759,7 +1792,7 @@ class ImageInferencePage(FunctionPage):
                 if raw_id is not None:
                     rid = int(raw_id.item()) if hasattr(raw_id, "item") else int(raw_id)
                 else:
-                    rid = f"{os.path.basename(fp)}#{fallback_counter}"
+                    rid = f"{image_id}#{fallback_counter}"
                     fallback_counter += 1
                 detections.append(
                     {
@@ -1778,7 +1811,7 @@ class ImageInferencePage(FunctionPage):
                 x1, y1, x2, y2 = [round(x, 2) for x in det["coords"]]
                 rows.append(
                     {
-                        "image": os.path.basename(fp),
+                        "图片ID": image_id,
                         "bolt_id": det["stable_id"],
                         "class": det["class"],
                         "confidence": det["conf"],
@@ -1789,11 +1822,11 @@ class ImageInferencePage(FunctionPage):
                     }
                 )
                 detail_lines.append(
-                    f"{os.path.basename(fp)} - ID {det['stable_id']} - {det['class']}({det['conf']:.3f})"
+                    f"{image_id} - ID {det['stable_id']} - {det['class']}({det['conf']:.3f})"
                 )
 
             if progress_callback:
-                progress_callback(idx + 1, total)
+                progress_callback(idx, total)
 
         if hasattr(model_for_batch, "tracker") and model_for_batch.tracker is not None:
             try:
@@ -1810,7 +1843,7 @@ class ImageInferencePage(FunctionPage):
     def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_layout):
         text_part = scan_layout["text_part"]
         try:
-            cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+            cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
             pd.DataFrame(rows, columns=cols).to_csv(
                 os.path.join(text_part, "bolt_detection_result.csv"), index=False
             )
@@ -1837,18 +1870,19 @@ class ImageInferencePage(FunctionPage):
             )
             html.append("<h2>检测结果明细</h2>")
             html.append(
-                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图像</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
+                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
             )
 
             # 每个螺栓 ID 只保留一次，避免跨帧重复出现在 HTML 报告
             unique_rows = {}
             for r in rows:
-                if r["bolt_id"] not in unique_rows:
-                    unique_rows[r["bolt_id"]] = r
+                key = (r["图片ID"], r["bolt_id"])
+                if key not in unique_rows:
+                    unique_rows[key] = r
 
             for r in unique_rows.values():
                 html.append(
-                    f"<tr><td>{r['image']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
+                    f"<tr><td>{r['图片ID']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
                 )
             html.append("</table></body></html>")
             report_path = os.path.join(text_part, "bolt_detection_report.html")
@@ -2024,12 +2058,18 @@ class VideoInferencePage(FunctionPage):
                 pd.DataFrame(self.thread.frame_records).to_csv(csv_path, index=False)
 
         # 导出松动关键帧图片
-            loose_frames = getattr(self.thread, "loose_frames", [])
-            for img, bolt_id, frame_idx in loose_frames:
-                img_path = os.path.join(
-                    scan_layout["raw_part"], f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
-                )
-                cv2.imwrite(img_path, img)
+            for frame_info in getattr(self.thread, "export_frames", []):
+                try:
+                    cv2.imwrite(
+                        os.path.join(scan_layout["raw_part"], build_frame_name(frame_info["frame_idx"])["raw_filename"]),
+                        frame_info["raw_frame"],
+                    )
+                    cv2.imwrite(
+                        os.path.join(scan_layout["image_part"], build_frame_name(frame_info["frame_idx"])["det_filename"]),
+                        frame_info["ann_frame"],
+                    )
+                except Exception:
+                    pass
 
         # 复制视频
             video_dst = os.path.join(scan_layout["raw_part"], "temp_output_video.mp4")
@@ -2349,7 +2389,7 @@ class CameraPage(FunctionPage):
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
-                cols = ["image", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+                cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
                 pd.DataFrame(rows, columns=cols).to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
@@ -2420,7 +2460,7 @@ class CameraPage(FunctionPage):
                             pass
 
             frame_records = getattr(thread, "frame_records", None)
-            columns = ["frame", "bolt_id", "status", "conf"]
+            columns = ["图片ID", "frame", "bolt_id", "status", "conf"]
             if frame_records:
                 df = pd.DataFrame(frame_records)
             else:
@@ -2431,13 +2471,16 @@ class CameraPage(FunctionPage):
             csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
             df.to_csv(csv_path, index=False)
 
-            for img, bolt_id, frame_idx in getattr(thread, "loose_frames", []):
+            for frame_info in getattr(thread, "export_frames", []):
                 try:
+                    frame_name = build_frame_name(frame_info["frame_idx"])
                     cv2.imwrite(
-                        os.path.join(
-                            scan_layout["raw_part"], f"loose_bolt_{bolt_id}_frame_{frame_idx}.jpg"
-                        ),
-                        img,
+                        os.path.join(scan_layout["raw_part"], frame_name["raw_filename"]),
+                        frame_info["raw_frame"],
+                    )
+                    cv2.imwrite(
+                        os.path.join(scan_layout["image_part"], frame_name["det_filename"]),
+                        frame_info["ann_frame"],
                     )
                 except Exception:
                     pass
