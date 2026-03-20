@@ -90,6 +90,76 @@ def reset_tracker_state(model):
         # 重置失败不阻塞主流程
         pass
 
+
+
+def is_loose_status(status):
+    return str(status or "").strip().lower() == "loose"
+
+
+def _candidate_sort_key(record):
+    return (
+        1 if is_loose_status(record.get("status") or record.get("class")) else 0,
+        float(record.get("confidence", record.get("conf", 0.0)) or 0.0),
+    )
+
+
+def pick_better_bolt_record(current, candidate):
+    if current is None:
+        return candidate
+    return candidate if _candidate_sort_key(candidate) > _candidate_sort_key(current) else current
+
+
+def aggregate_bolt_records(records):
+    aggregated = {}
+    for record in records or []:
+        bolt_id = record.get("bolt_id")
+        if bolt_id is None:
+            continue
+        normalized = dict(record)
+        if "status" not in normalized and "class" in normalized:
+            normalized["status"] = normalized.get("class")
+        if "class" not in normalized and "status" in normalized:
+            normalized["class"] = normalized.get("status")
+        if "confidence" not in normalized and "conf" in normalized:
+            normalized["confidence"] = normalized.get("conf")
+        if "conf" not in normalized and "confidence" in normalized:
+            normalized["conf"] = normalized.get("confidence")
+        aggregated[bolt_id] = pick_better_bolt_record(aggregated.get(bolt_id), normalized)
+    return aggregated
+
+
+def aggregated_records_to_rows(aggregated, mode="image"):
+    rows = []
+    for bolt_id, record in sorted(aggregated.items(), key=lambda item: str(item[0])):
+        if mode == "video":
+            rows.append({
+                "图片ID": record.get("图片ID", ""),
+                "frame": record.get("frame", ""),
+                "bolt_id": bolt_id,
+                "status": record.get("status", ""),
+                "conf": record.get("conf", record.get("confidence", 0.0)),
+                "x1": record.get("x1", ""),
+                "y1": record.get("y1", ""),
+                "x2": record.get("x2", ""),
+                "y2": record.get("y2", ""),
+                "raw_path": record.get("raw_path", ""),
+                "det_path": record.get("det_path", ""),
+            })
+        else:
+            rows.append({
+                "图片ID": record.get("图片ID", ""),
+                "bolt_id": bolt_id,
+                "class": record.get("class", record.get("status", "")),
+                "confidence": record.get("confidence", record.get("conf", 0.0)),
+                "x1": record.get("x1", ""),
+                "y1": record.get("y1", ""),
+                "x2": record.get("x2", ""),
+                "y2": record.get("y2", ""),
+                "raw_path": record.get("raw_path", ""),
+                "det_path": record.get("det_path", ""),
+            })
+    return rows
+
 def _read_command_output(command):
     try:
         output = subprocess.check_output(command, stderr=subprocess.STDOUT, text=True)
@@ -939,9 +1009,9 @@ class VideoProcessingThread(QThread):
         self.first_frame_orig = None
         self.first_frame_ann  = None
 
-        self.frame_records = []   # 记录每帧所有螺栓的检测结果
+        self.frame_records = []   # 聚合后每个螺栓的最佳检测结果
         self.export_frames = []  # [{frame_id, raw_frame, ann_frame, frame_idx, bolt_id}]
-        self._exported_frame_indexes = set()
+        self.best_records = {}
 
     def run(self):
         # 每次视频推理前强制清空跟踪器状态，保证 ID 从 1 开始
@@ -999,39 +1069,45 @@ class VideoProcessingThread(QThread):
                     cname = result.names.get(cid, str(cid))
                     self.detected_objects[stable_id] = cname
 
-            # --- 数据收集：每帧每个螺栓 ---
+            # --- 数据收集：按 bolt_id 聚合每个螺栓的最佳结果 ---
+            frame_name = build_frame_name(idx_frame)
+            ann_bgr_for_export = None
             for box in result.boxes:
-                # 只收集有映射的
                 stable_id = getattr(box, "id", None)
                 if stable_id is None:
                     continue
                 cid = int(box.cls[0]) if box.cls is not None else -1
                 cname = result.names.get(cid, str(cid))
                 conf = float(box.conf[0]) if box.conf is not None else 0.0
-
-                # 收集所有检测数据（frame, bolt_id, status, conf）
-                frame_name = build_frame_name(idx_frame)
-                self.frame_records.append({
+                coords = [round(float(x), 2) for x in box.xyxy[0].tolist()]
+                candidate = {
                     "图片ID": frame_name["id"],
                     "frame": idx_frame,
                     "bolt_id": stable_id,
                     "status": cname,
-                    "conf": conf
-                })
-
-                # 如果是"松动"螺栓，则收集关键帧（确保仅保存每个螺栓的首帧或全部帧，可按需改动）
-                if cname.lower() == "loose" and idx_frame not in self._exported_frame_indexes:  # 注意"loose"应与你模型类别一致
-                    ann_bgr = result.plot(img=frame_bgr.copy())
-                    self.export_frames.append(
+                    "conf": conf,
+                    "confidence": conf,
+                    "x1": coords[0],
+                    "y1": coords[1],
+                    "x2": coords[2],
+                    "y2": coords[3],
+                    "raw_path": frame_name["raw_filename"],
+                    "det_path": frame_name["det_filename"],
+                }
+                previous = self.best_records.get(stable_id)
+                best = pick_better_bolt_record(previous, candidate)
+                if best is candidate:
+                    if ann_bgr_for_export is None:
+                        ann_bgr_for_export = result.plot(img=frame_bgr.copy())
+                    export_record = dict(candidate)
+                    export_record.update(
                         {
-                            "图片ID": frame_name["id"],
                             "frame_idx": idx_frame,
-                            "bolt_id": stable_id,
                             "raw_frame": frame_bgr.copy(),
-                            "ann_frame": ann_bgr.copy(),
+                            "ann_frame": ann_bgr_for_export.copy(),
                         }
                     )
-                    self._exported_frame_indexes.add(idx_frame)
+                    self.best_records[stable_id] = export_record
 
             # --- 首帧保存用于报告 ---
             if idx_frame == 1:
@@ -1052,6 +1128,22 @@ class VideoProcessingThread(QThread):
             self.progress_update.emit(prog)
 
         out_vid.release()
+        self.frame_records = aggregated_records_to_rows(self.best_records, mode="video")
+        self.export_frames = [
+            {
+                "图片ID": record.get("图片ID"),
+                "frame_idx": record.get("frame_idx"),
+                "bolt_id": bolt_id,
+                "raw_frame": record.get("raw_frame"),
+                "ann_frame": record.get("ann_frame"),
+            }
+            for bolt_id, record in sorted(self.best_records.items(), key=lambda item: str(item[0]))
+            if record.get("raw_frame") is not None and record.get("ann_frame") is not None
+        ]
+        self.detected_objects = {
+            bolt_id: record.get("status", "")
+            for bolt_id, record in sorted(self.best_records.items(), key=lambda item: str(item[0]))
+        }
         self.finished_signal.emit(os.path.abspath(out_path))
 
     def stop(self):
@@ -1730,11 +1822,11 @@ class ImageInferencePage(FunctionPage):
             verbose=False,
         )
 
-        rows = []
+        best_records = {}
         sample_orig = None
         sample_ann = None
         detail_lines = []
-        annotated_infos = []  # [(source_name, annotated_path)]
+        annotated_infos = []  # 聚合后 [(image_id, annotated_path)]
 
         for idx, (fp, res) in enumerate(zip(files, results_gen), start=1):
             orig_bgr = res.orig_img
@@ -1742,29 +1834,8 @@ class ImageInferencePage(FunctionPage):
             ann_rgb = cv2.cvtColor(ann_bgr, cv2.COLOR_BGR2RGB)
             image_name = build_image_name(idx)
             image_id = image_name["id"]
-
-            try:
-                raw_path = os.path.join(raw_part, image_name["raw_filename"])
-                ext = os.path.splitext(fp)[1].lower() if fp else ""
-                if os.path.abspath(fp) == os.path.abspath(raw_path):
-                    pass
-                elif ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
-                    shutil.copy2(fp, raw_path)
-                else:
-                    cv2.imwrite(raw_path, orig_bgr)
-            except Exception:
-                pass
-
-            # 保存带检测框的图像
-            ann_path = None
-            try:
-                ann_path = os.path.join(image_part, image_name["det_filename"])
-                success = cv2.imwrite(ann_path, ann_bgr)
-                if not success:
-                    ann_path = None
-            except Exception:
-                ann_path = None
-            annotated_infos.append((image_id, ann_path))
+            raw_path = os.path.join(raw_part, image_name["raw_filename"])
+            ann_path = os.path.join(image_part, image_name["det_filename"])
 
             if idx == 1:
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
@@ -1809,20 +1880,25 @@ class ImageInferencePage(FunctionPage):
 
             for det in detections:
                 x1, y1, x2, y2 = [round(x, 2) for x in det["coords"]]
-                rows.append(
-                    {
-                        "图片ID": image_id,
-                        "bolt_id": det["stable_id"],
-                        "class": det["class"],
-                        "confidence": det["conf"],
-                        "x1": x1,
-                        "y1": y1,
-                        "x2": x2,
-                        "y2": y2,
-                    }
-                )
-                detail_lines.append(
-                    f"{image_id} - ID {det['stable_id']} - {det['class']}({det['conf']:.3f})"
+                candidate = {
+                    "图片ID": image_id,
+                    "bolt_id": det["stable_id"],
+                    "class": det["class"],
+                    "status": det["class"],
+                    "confidence": det["conf"],
+                    "conf": det["conf"],
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "raw_path": raw_path,
+                    "det_path": ann_path,
+                    "raw_image": orig_bgr.copy(),
+                    "ann_image": ann_bgr.copy(),
+                    "source_file": fp,
+                }
+                best_records[det["stable_id"]] = pick_better_bolt_record(
+                    best_records.get(det["stable_id"]), candidate
                 )
 
             if progress_callback:
@@ -1837,13 +1913,41 @@ class ImageInferencePage(FunctionPage):
         # 主动释放本次推理专用的模型实例，彻底断开与上一批次的状态关联
         del model_for_batch
 
+        rows = aggregated_records_to_rows(best_records, mode="image")
+        detail_lines = []
+        for record in best_records.values():
+            try:
+                ext = os.path.splitext(record.get("source_file") or "")[1].lower()
+                src = record.get("source_file")
+                raw_path = record.get("raw_path")
+                if src and raw_path and os.path.abspath(src) != os.path.abspath(raw_path):
+                    if ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+                        shutil.copy2(src, raw_path)
+                    else:
+                        cv2.imwrite(raw_path, record.get("raw_image"))
+                elif raw_path and record.get("raw_image") is not None and not os.path.exists(raw_path):
+                    cv2.imwrite(raw_path, record.get("raw_image"))
+            except Exception:
+                pass
+            try:
+                det_path = record.get("det_path")
+                if det_path and record.get("ann_image") is not None:
+                    success = cv2.imwrite(det_path, record.get("ann_image"))
+                    if success:
+                        annotated_infos.append((record.get("图片ID"), det_path))
+            except Exception:
+                pass
+            detail_lines.append(
+                f"{record.get('图片ID')} - ID {record.get('bolt_id')} - {record.get('class')}({float(record.get('confidence', 0.0)):.3f})"
+            )
+
         self.text_detail.setPlainText("\n".join(detail_lines))
         return rows, sample_orig, sample_ann, annotated_infos
 
     def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_layout):
         text_part = scan_layout["text_part"]
         try:
-            cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+            cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
             pd.DataFrame(rows, columns=cols).to_csv(
                 os.path.join(text_part, "bolt_detection_result.csv"), index=False
             )
@@ -1873,14 +1977,7 @@ class ImageInferencePage(FunctionPage):
                 "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
             )
 
-            # 每个螺栓 ID 只保留一次，避免跨帧重复出现在 HTML 报告
-            unique_rows = {}
             for r in rows:
-                key = (r["图片ID"], r["bolt_id"])
-                if key not in unique_rows:
-                    unique_rows[key] = r
-
-            for r in unique_rows.values():
                 html.append(
                     f"<tr><td>{r['图片ID']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
                 )
@@ -2030,13 +2127,16 @@ class VideoInferencePage(FunctionPage):
                         html.append(f"<p><b>标注结果示例帧：</b><br><img src='{ann_data_uri}' width='600'></p>")
                 # 检测结果列表
                 html.append("<h2>检测结果</h2>")
-                if not self.thread or len(self.thread.detected_objects) == 0:
+                aggregated_rows = getattr(self.thread, "frame_records", []) if self.thread else []
+                if not aggregated_rows:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    html.append("<ul>")
-                    for sid, cname in sorted(self.thread.detected_objects.items()):
-                        html.append(f"<li>螺栓编号 {sid}: 状态 = {cname}</li>")
-                    html.append("</ul>")
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
+                    for row in aggregated_rows:
+                        html.append(
+                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                        )
+                    html.append("</table>")
                 # 视频文件链接
                 file_name = os.path.basename(path)
                 html.append(f"<p>输出视频文件：<a href='{file_name}'>{file_name}</a></p>")
@@ -2055,7 +2155,14 @@ class VideoInferencePage(FunctionPage):
         # 导出CSV（所有检测数据）
             if hasattr(self.thread, "frame_records"):
                 csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
-                pd.DataFrame(self.thread.frame_records).to_csv(csv_path, index=False)
+                xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
+                video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
+                video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
+                video_df.to_csv(csv_path, index=False)
+                try:
+                    video_df.to_excel(xlsx_path, index=False)
+                except Exception:
+                    pass
 
         # 导出松动关键帧图片
             for frame_info in getattr(self.thread, "export_frames", []):
@@ -2389,7 +2496,7 @@ class CameraPage(FunctionPage):
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
-                cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2"]
+                cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
                 pd.DataFrame(rows, columns=cols).to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
@@ -2460,7 +2567,7 @@ class CameraPage(FunctionPage):
                             pass
 
             frame_records = getattr(thread, "frame_records", None)
-            columns = ["图片ID", "frame", "bolt_id", "status", "conf"]
+            columns = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
             if frame_records:
                 df = pd.DataFrame(frame_records)
             else:
@@ -2470,6 +2577,10 @@ class CameraPage(FunctionPage):
 
             csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
             df.to_csv(csv_path, index=False)
+            try:
+                df.to_excel(os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"), index=False)
+            except Exception:
+                pass
 
             for frame_info in getattr(thread, "export_frames", []):
                 try:
@@ -2516,14 +2627,16 @@ class CameraPage(FunctionPage):
                         pass
 
                 html.append("<h2>检测结果</h2>")
-                detected = getattr(thread, "detected_objects", {})
-                if not detected:
+                frame_records = getattr(thread, "frame_records", []) or []
+                if not frame_records:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    html.append("<ul>")
-                    for sid, cname in sorted(detected.items()):
-                        html.append(f"<li>螺栓编号 {sid}: 状态 = {cname}</li>")
-                    html.append("</ul>")
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
+                    for row in frame_records:
+                        html.append(
+                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                        )
+                    html.append("</table>")
 
                 if dest_video_path:
                     rel_name = os.path.basename(dest_video_path)
