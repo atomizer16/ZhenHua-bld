@@ -138,10 +138,34 @@ def aggregate_bolt_records(records):
     return aggregated
 
 
+UNIFIED_REPORT_COLUMNS = ["图片ID", "螺栓ID", "螺栓状态", "置信度", "x1", "y1", "x2", "y2"]
+
+
+def to_unified_report_rows(records):
+    unified_rows = []
+    for record in records or []:
+        unified_rows.append(
+            {
+                "图片ID": record.get("图片ID", ""),
+                "螺栓ID": record.get("螺栓ID", record.get("bolt_id", "")),
+                "螺栓状态": record.get("螺栓状态", record.get("status", record.get("class", ""))),
+                "置信度": record.get("置信度", record.get("confidence", record.get("conf", 0.0))),
+                "x1": record.get("x1", ""),
+                "y1": record.get("y1", ""),
+                "x2": record.get("x2", ""),
+                "y2": record.get("y2", ""),
+            }
+        )
+    return unified_rows
+
+
+def to_unified_report_df(records):
+    return pd.DataFrame(to_unified_report_rows(records), columns=UNIFIED_REPORT_COLUMNS)
+
+
 def aggregated_records_to_rows(aggregated, mode="image"):
     rows = []
     for bolt_id, record in sorted(aggregated.items(), key=lambda item: bolt_id_sort_key(item[0])):
-    for bolt_id, record in sorted(aggregated.items(), key=lambda item: str(item[0])):
         if mode == "video":
             rows.append({
                 "图片ID": record.get("图片ID", ""),
@@ -1964,13 +1988,14 @@ class ImageInferencePage(FunctionPage):
                 str(r.get("bolt_id", "")),
             ),
         )
+        report_df = to_unified_report_df(rows)
+        xlsx_path = os.path.join(text_part, "bolt_detection_result.xlsx")
+        csv_path = os.path.join(text_part, "bolt_detection_result.csv")
         try:
-            cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
-            pd.DataFrame(rows, columns=cols).to_csv(
-                os.path.join(text_part, "bolt_detection_result.csv"), index=False
-            )
+            report_df.to_excel(xlsx_path, index=False)
+            report_df.to_csv(csv_path, index=False)
         except Exception as e:
-            QMessageBox.warning(self, "CSV保存失败", f"检测详情保存失败: {e}")
+            QMessageBox.warning(self, "报表保存失败", f"检测详情保存失败: {e}")
         try:
             fmt = "PNG"
             orig_buf = io.BytesIO()
@@ -2179,19 +2204,16 @@ class VideoInferencePage(FunctionPage):
             refresh_scan_id(scan_layout, "v")
             scan_dir = scan_layout["scan_dir"]
 
-        # 导出CSV（所有检测数据）
+        # 导出统一报表（每个螺栓仅保留最佳结果）
             if hasattr(self.thread, "frame_records"):
-                csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
-                video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
-                video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
-                video_df = video_df.sort_values(by=["bolt_id", "frame"], kind="stable")
-                video_df.to_csv(csv_path, index=False)
                 xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
-                video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
-                video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
-                video_df.to_csv(csv_path, index=False)
+                csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
                 try:
+                    aggregated = aggregate_bolt_records(self.thread.frame_records)
+                    video_rows = aggregated_records_to_rows(aggregated, mode="video")
+                    video_df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                     video_df.to_excel(xlsx_path, index=False)
+                    video_df.to_csv(csv_path, index=False)
                 except Exception:
                     pass
 
@@ -2527,13 +2549,13 @@ class CameraPage(FunctionPage):
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
-                cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
-                image_df = pd.DataFrame(rows, columns=cols).sort_values(
-                    by=["图片ID", "bolt_id"], kind="stable"
-                )
+                image_df = to_unified_report_df(rows).sort_values(by=["图片ID", "螺栓ID"], kind="stable")
                 image_df.to_excel(
-                pd.DataFrame(rows, columns=cols).to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
+                    index=False,
+                )
+                image_df.to_csv(
+                    os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"),
                     index=False,
                 )
             except Exception:
@@ -2602,19 +2624,12 @@ class CameraPage(FunctionPage):
                             pass
 
             frame_records = getattr(thread, "frame_records", None)
-            columns = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
-            if frame_records:
-                df = pd.DataFrame(frame_records)
-            else:
-                df = pd.DataFrame(columns=columns)
-
-            df = df.reindex(columns=columns)
-            df = df.sort_values(by=["bolt_id", "frame"], kind="stable")
-
-            csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
-            df.to_csv(csv_path, index=False)
             try:
+                aggregated = aggregate_bolt_records(frame_records or [])
+                video_rows = aggregated_records_to_rows(aggregated, mode="video")
+                df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                 df.to_excel(os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"), index=False)
+                df.to_csv(os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"), index=False)
             except Exception:
                 pass
 
