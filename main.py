@@ -198,10 +198,10 @@ def aggregated_records_to_rows(aggregated, mode="image"):
                 "bolt_id": bolt_id,
                 "class": record.get("class", record.get("status", "")),
                 "confidence": record.get("confidence", record.get("conf", 0.0)),
-                "x1": record.get("x1", ""),
-                "y1": record.get("y1", ""),
-                "x2": record.get("x2", ""),
-                "y2": record.get("y2", ""),
+                "检测框的x1": record.get("x1", ""),
+                "检测框的y1": record.get("y1", ""),
+                "检测框的x2": record.get("x2", ""),
+                "检测框的y2": record.get("y2", ""),
                 "raw_path": record.get("raw_path", ""),
                 "det_path": record.get("det_path", ""),
             })
@@ -427,6 +427,13 @@ def refresh_scan_id(scan_layout, scan_type, extra_metadata=None):
     return metadata
 
 
+def is_loose_status(status):
+    status_text = str(status or "").strip().lower()
+    if not status_text:
+        return False
+    return ("松" in status_text) or ("loose" in status_text)
+
+
 def cleanup_text_part_files(text_part, keep_excel=None, keep_html=None):
     keep_names = {"ID.TXT"}
     if keep_excel:
@@ -450,26 +457,6 @@ def cleanup_text_part_files(text_part, keep_excel=None, keep_html=None):
                     os.remove(fp)
                 except Exception:
                     pass
-
-
-def summarize_rows_by_bolt(rows):
-    summary = {}
-    for row in rows or []:
-        bolt_id = normalize_bolt_id(row.get("bolt_id", row.get("螺栓ID", "")))
-        conf = float(row.get("confidence", row.get("conf", row.get("置信度", 0.0))) or 0.0)
-        status = row.get("status", row.get("class", row.get("螺栓状态", "")))
-        image_id = row.get("图片ID", "")
-        det_path = row.get("det_path", "")
-        current = summary.get(bolt_id)
-        if current is None or conf > current["conf"]:
-            summary[bolt_id] = {
-                "bolt_id": bolt_id,
-                "status": status,
-                "conf": conf,
-                "image_id": image_id,
-                "det_path": det_path,
-            }
-    return [summary[k] for k in sorted(summary, key=bolt_id_sort_key)]
 
 
 # —— 资源路径统一管理 ——
@@ -2075,7 +2062,19 @@ class ImageInferencePage(FunctionPage):
             ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
             ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
 
-            summary_rows = summarize_rows_by_bolt(rows)
+            loose_best = {}
+            for r in rows:
+                if not is_loose_status(r.get("class", r.get("status", ""))):
+                    continue
+                bolt_id = r.get("bolt_id", "")
+                conf = float(r.get("confidence", r.get("conf", 0.0)) or 0.0)
+                old = loose_best.get(bolt_id)
+                if old is None or conf > old["confidence"]:
+                    loose_best[bolt_id] = {
+                        "confidence": conf,
+                        "det_path": r.get("det_path", ""),
+                    }
+
             html = []
             html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
             html.append("<h1>图片批次检测报告</h1>")
@@ -2086,16 +2085,17 @@ class ImageInferencePage(FunctionPage):
                 f"<p><b>示例标注图像：</b><br><img src='{ann_data_uri}' width='600'></p>"
             )
             html.append("<h2>螺栓检测摘要</h2>")
-            html.append("<table border='1' cellspacing='0' cellpadding='4'>")
-            html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
-            for r in summary_rows:
-                image_name = "-"
-                if is_loose_status(r.get("status")):
-                    image_name = os.path.basename(r.get("det_path", "")) or str(r.get("image_id", "")) or "-"
+            html.append("<ul>")
+            for r in rows:
+                bolt_id = r.get("bolt_id", "")
+                bolt_state = r.get("class", r.get("status", ""))
+                loose_path = "-"
+                if bolt_id in loose_best:
+                    loose_path = loose_best[bolt_id]["det_path"] or "-"
                 html.append(
-                    f"<tr><td>{r.get('bolt_id', '')}</td><td>{r.get('status', '')}</td><td>{float(r.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>无</td></tr>"
+                    f"<li>螺栓编号：{bolt_id}；螺栓状态：{bolt_state}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：无</li>"
                 )
-            html.append("</table>")
+            html.append("</ul>")
             html.append("</body></html>")
             report_path = os.path.join(text_part, "bolt_detection_report.html")
             with open(report_path, "w", encoding="utf-8") as f:
@@ -2247,17 +2247,32 @@ class VideoInferencePage(FunctionPage):
                 if not aggregated_rows:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    file_name = os.path.basename(path)
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'>")
-                    html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
-                    for row in summarize_rows_by_bolt(aggregated_rows):
-                        image_name = "-"
-                        if is_loose_status(row.get("status")):
-                            image_name = os.path.basename(row.get("det_path", "")) or str(row.get("image_id", "")) or "-"
+                    loose_best = {}
+                    for row in aggregated_rows:
+                        if not is_loose_status(row.get("status", "")):
+                            continue
+                        bolt_id = row.get("bolt_id", "")
+                        conf = float(row.get("conf", 0.0) or 0.0)
+                        old = loose_best.get(bolt_id)
+                        if old is None or conf > old["conf"]:
+                            loose_best[bolt_id] = {
+                                "conf": conf,
+                                "det_path": row.get("det_path", ""),
+                            }
+                    html.append("<ul>")
+                    for row in sorted(
+                        aggregated_rows,
+                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
+                    ):
+                        bolt_id = row.get("bolt_id", "")
+                        loose_path = "-"
+                        if bolt_id in loose_best:
+                            loose_path = loose_best[bolt_id]["det_path"] or "-"
+                        file_name = os.path.basename(path)
                         html.append(
-                            f"<tr><td>{row.get('bolt_id', '')}</td><td>{row.get('status', '')}</td><td>{float(row.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>{file_name}</td></tr>"
+                            f"<li>螺栓编号：{bolt_id}；螺栓状态：{row.get('status', '')}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：{file_name}</li>"
                         )
-                    html.append("</table>")
+                    html.append("</ul>")
                 # 视频文件链接
                 file_name = os.path.basename(path)
                 html.append(f"<p>输出视频文件：<a href='{file_name}'>{file_name}</a></p>")
@@ -2754,17 +2769,32 @@ class CameraPage(FunctionPage):
                 if not frame_records:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    video_link = os.path.basename(dest_video_path) if dest_video_path else "-"
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'>")
-                    html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
-                    for row in summarize_rows_by_bolt(frame_records):
-                        image_name = "-"
-                        if is_loose_status(row.get("status")):
-                            image_name = os.path.basename(row.get("det_path", "")) or str(row.get("image_id", "")) or "-"
+                    loose_best = {}
+                    for row in frame_records:
+                        if not is_loose_status(row.get("status", "")):
+                            continue
+                        bolt_id = row.get("bolt_id", "")
+                        conf = float(row.get("conf", 0.0) or 0.0)
+                        old = loose_best.get(bolt_id)
+                        if old is None or conf > old["conf"]:
+                            loose_best[bolt_id] = {
+                                "conf": conf,
+                                "det_path": row.get("det_path", ""),
+                            }
+                    html.append("<ul>")
+                    for row in sorted(
+                        frame_records,
+                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
+                    ):
+                        bolt_id = row.get("bolt_id", "")
+                        loose_path = "-"
+                        if bolt_id in loose_best:
+                            loose_path = loose_best[bolt_id]["det_path"] or "-"
+                        video_link = os.path.basename(dest_video_path) if dest_video_path else "-"
                         html.append(
-                            f"<tr><td>{row.get('bolt_id', '')}</td><td>{row.get('status', '')}</td><td>{float(row.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>{video_link}</td></tr>"
+                            f"<li>螺栓编号：{bolt_id}；螺栓状态：{row.get('status', '')}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：{video_link}</li>"
                         )
-                    html.append("</table>")
+                    html.append("</ul>")
 
                 if dest_video_path:
                     rel_name = os.path.basename(dest_video_path)
