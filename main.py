@@ -94,7 +94,18 @@ def reset_tracker_state(model):
 
 
 def is_loose_status(status):
-    return str(status or "").strip().lower() == "loose"
+    status_text = str(status or "").strip().lower()
+    if not status_text:
+        return False
+    return ("松" in status_text) or ("loose" in status_text)
+
+
+def normalize_bolt_id(value):
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value or "").strip()
+    m = re.search(r"\d+", text)
+    return m.group(0) if m else text
 
 
 def bolt_id_sort_key(value):
@@ -148,13 +159,13 @@ def to_unified_report_rows(records):
         unified_rows.append(
             {
                 "图片ID": record.get("图片ID", ""),
-                "螺栓ID": record.get("螺栓ID", record.get("bolt_id", "")),
+                "螺栓ID": normalize_bolt_id(record.get("螺栓ID", record.get("bolt_id", ""))),
                 "螺栓状态": record.get("螺栓状态", record.get("status", record.get("class", ""))),
                 "置信度": record.get("置信度", record.get("confidence", record.get("conf", 0.0))),
-                "x1": record.get("x1", ""),
-                "y1": record.get("y1", ""),
-                "x2": record.get("x2", ""),
-                "y2": record.get("y2", ""),
+                "检测框的x1": record.get("x1", record.get("检测框的x1", "")),
+                "检测框的y1": record.get("y1", record.get("检测框的y1", "")),
+                "检测框的x2": record.get("x2", record.get("检测框的x2", "")),
+                "检测框的y2": record.get("y2", record.get("检测框的y2", "")),
             }
         )
     return unified_rows
@@ -1078,6 +1089,7 @@ class VideoProcessingThread(QThread):
         self.first_frame_ann  = None
 
         self.frame_records = []   # 聚合后每个螺栓的最佳检测结果
+        self.all_frame_records = []  # 每一帧每个螺栓的完整检测记录
         self.export_frames = []  # [{frame_id, raw_frame, ann_frame, frame_idx, bolt_id}]
         self.best_records = {}
 
@@ -1164,6 +1176,7 @@ class VideoProcessingThread(QThread):
                 }
                 previous = self.best_records.get(stable_id)
                 best = pick_better_bolt_record(previous, candidate)
+                self.all_frame_records.append(dict(candidate))
                 if best is candidate:
                     if ann_bgr_for_export is None:
                         ann_bgr_for_export = result.plot(img=frame_bgr.copy())
@@ -1196,7 +1209,10 @@ class VideoProcessingThread(QThread):
             self.progress_update.emit(prog)
 
         out_vid.release()
-        self.frame_records = aggregated_records_to_rows(self.best_records, mode="video")
+        self.frame_records = sorted(
+            self.all_frame_records,
+            key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+        )
         self.export_frames = [
             {
                 "图片ID": record.get("图片ID"),
@@ -1891,6 +1907,7 @@ class ImageInferencePage(FunctionPage):
         )
 
         best_records = {}
+        all_rows = []
         sample_orig = None
         sample_ann = None
         detail_lines = []
@@ -1950,7 +1967,7 @@ class ImageInferencePage(FunctionPage):
                 x1, y1, x2, y2 = [round(x, 2) for x in det["coords"]]
                 candidate = {
                     "图片ID": image_id,
-                    "bolt_id": det["stable_id"],
+                    "bolt_id": normalize_bolt_id(det["stable_id"]),
                     "class": det["class"],
                     "status": det["class"],
                     "confidence": det["conf"],
@@ -1968,6 +1985,7 @@ class ImageInferencePage(FunctionPage):
                 best_records[det["stable_id"]] = pick_better_bolt_record(
                     best_records.get(det["stable_id"]), candidate
                 )
+                all_rows.append(dict(candidate))
 
             if progress_callback:
                 progress_callback(idx, total)
@@ -1981,7 +1999,13 @@ class ImageInferencePage(FunctionPage):
         # 主动释放本次推理专用的模型实例，彻底断开与上一批次的状态关联
         del model_for_batch
 
-        rows = aggregated_records_to_rows(best_records, mode="image")
+        rows = sorted(
+            all_rows,
+            key=lambda r: (
+                bolt_id_sort_key(r.get("bolt_id", "")),
+                str(r.get("图片ID", "")),
+            ),
+        )
         detail_lines = []
         for record in best_records.values():
             try:
@@ -2017,8 +2041,8 @@ class ImageInferencePage(FunctionPage):
         rows = sorted(
             rows,
             key=lambda r: (
+                bolt_id_sort_key(r.get("bolt_id", r.get("螺栓ID", ""))),
                 str(r.get("图片ID", "")),
-                str(r.get("bolt_id", "")),
             ),
         )
         report_df = to_unified_report_df(rows)
@@ -2268,9 +2292,11 @@ class VideoInferencePage(FunctionPage):
             if hasattr(self.thread, "frame_records"):
                 xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
                 try:
-                    aggregated = aggregate_bolt_records(self.thread.frame_records)
-                    video_rows = aggregated_records_to_rows(aggregated, mode="video")
-                    video_df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
+                    video_rows = sorted(
+                        getattr(self.thread, "frame_records", []) or [],
+                        key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+                    )
+                    video_df = to_unified_report_df(video_rows)
                     video_df.to_excel(xlsx_path, index=False)
                 except Exception:
                     pass
@@ -2613,7 +2639,7 @@ class CameraPage(FunctionPage):
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
-                image_df = to_unified_report_df(rows).sort_values(by=["图片ID", "螺栓ID"], kind="stable")
+                image_df = to_unified_report_df(rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                 image_df.to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
@@ -2685,9 +2711,11 @@ class CameraPage(FunctionPage):
 
             frame_records = getattr(thread, "frame_records", None)
             try:
-                aggregated = aggregate_bolt_records(frame_records or [])
-                video_rows = aggregated_records_to_rows(aggregated, mode="video")
-                df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
+                video_rows = sorted(
+                    frame_records or [],
+                    key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+                )
+                df = to_unified_report_df(video_rows)
                 df.to_excel(os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"), index=False)
             except Exception:
                 pass
