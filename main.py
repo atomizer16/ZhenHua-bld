@@ -13,6 +13,7 @@ import math
 import subprocess
 import platform
 import uuid
+import glob
 from pathlib import Path
 import cv2
 from PIL import Image
@@ -138,7 +139,7 @@ def aggregate_bolt_records(records):
     return aggregated
 
 
-UNIFIED_REPORT_COLUMNS = ["图片ID", "螺栓ID", "螺栓状态", "置信度", "x1", "y1", "x2", "y2"]
+UNIFIED_REPORT_COLUMNS = ["图片ID", "螺栓ID", "螺栓状态", "置信度", "检测框的x1", "检测框的y1", "检测框的x2", "检测框的y2"]
 
 
 def to_unified_report_rows(records):
@@ -186,10 +187,10 @@ def aggregated_records_to_rows(aggregated, mode="image"):
                 "bolt_id": bolt_id,
                 "class": record.get("class", record.get("status", "")),
                 "confidence": record.get("confidence", record.get("conf", 0.0)),
-                "x1": record.get("x1", ""),
-                "y1": record.get("y1", ""),
-                "x2": record.get("x2", ""),
-                "y2": record.get("y2", ""),
+                "检测框的x1": record.get("x1", ""),
+                "检测框的y1": record.get("y1", ""),
+                "检测框的x2": record.get("x2", ""),
+                "检测框的y2": record.get("y2", ""),
                 "raw_path": record.get("raw_path", ""),
                 "det_path": record.get("det_path", ""),
             })
@@ -413,6 +414,38 @@ def refresh_scan_id(scan_layout, scan_type, extra_metadata=None):
     metadata = build_scan_metadata(scan_type, extra_metadata=extra_metadata)
     write_id_file(scan_layout.get("text_part") or scan_layout.get("scan_dir") or "", metadata)
     return metadata
+
+
+def is_loose_status(status):
+    status_text = str(status or "").strip().lower()
+    if not status_text:
+        return False
+    return ("松" in status_text) or ("loose" in status_text)
+
+
+def cleanup_text_part_files(text_part, keep_excel=None, keep_html=None):
+    keep_names = {"ID.TXT"}
+    if keep_excel:
+        keep_names.add(os.path.basename(keep_excel))
+    if keep_html:
+        keep_names.add(os.path.basename(keep_html))
+    for fp in glob.glob(os.path.join(text_part, "*")):
+        if not os.path.isfile(fp):
+            continue
+        name = os.path.basename(fp)
+        lower_name = name.lower()
+        if lower_name.endswith(".csv"):
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+            continue
+        if lower_name.endswith(".xlsx") or lower_name.endswith(".xls") or lower_name.endswith(".html"):
+            if name not in keep_names:
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
 
 
 # —— 资源路径统一管理 ——
@@ -1990,10 +2023,8 @@ class ImageInferencePage(FunctionPage):
         )
         report_df = to_unified_report_df(rows)
         xlsx_path = os.path.join(text_part, "bolt_detection_result.xlsx")
-        csv_path = os.path.join(text_part, "bolt_detection_result.csv")
         try:
             report_df.to_excel(xlsx_path, index=False)
-            report_df.to_csv(csv_path, index=False)
         except Exception as e:
             QMessageBox.warning(self, "报表保存失败", f"检测详情保存失败: {e}")
         try:
@@ -2006,6 +2037,20 @@ class ImageInferencePage(FunctionPage):
             sample_ann.save(ann_buf, format=fmt)
             ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
             ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
+
+            loose_best = {}
+            for r in rows:
+                if not is_loose_status(r.get("class", r.get("status", ""))):
+                    continue
+                bolt_id = r.get("bolt_id", "")
+                conf = float(r.get("confidence", r.get("conf", 0.0)) or 0.0)
+                old = loose_best.get(bolt_id)
+                if old is None or conf > old["confidence"]:
+                    loose_best[bolt_id] = {
+                        "confidence": conf,
+                        "det_path": r.get("det_path", ""),
+                    }
+
             html = []
             html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
             html.append("<h1>图片批次检测报告</h1>")
@@ -2015,19 +2060,23 @@ class ImageInferencePage(FunctionPage):
             html.append(
                 f"<p><b>示例标注图像：</b><br><img src='{ann_data_uri}' width='600'></p>"
             )
-            html.append("<h2>检测结果明细</h2>")
-            html.append(
-                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
-            )
-
+            html.append("<h2>螺栓检测摘要</h2>")
+            html.append("<ul>")
             for r in rows:
+                bolt_id = r.get("bolt_id", "")
+                bolt_state = r.get("class", r.get("status", ""))
+                loose_path = "-"
+                if bolt_id in loose_best:
+                    loose_path = loose_best[bolt_id]["det_path"] or "-"
                 html.append(
-                    f"<tr><td>{r['图片ID']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
+                    f"<li>螺栓编号：{bolt_id}；螺栓状态：{bolt_state}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：无</li>"
                 )
-            html.append("</table></body></html>")
+            html.append("</ul>")
+            html.append("</body></html>")
             report_path = os.path.join(text_part, "bolt_detection_report.html")
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(html))
+            cleanup_text_part_files(text_part, keep_excel=xlsx_path, keep_html=report_path)
         except Exception as e:
             QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
     def on_back(self):
@@ -2169,26 +2218,37 @@ class VideoInferencePage(FunctionPage):
                         html.append(f"<p><b>原始视频首帧：</b><br><img src='{orig_data_uri}' width='600'></p>")
                         html.append(f"<p><b>标注结果示例帧：</b><br><img src='{ann_data_uri}' width='600'></p>")
                 # 检测结果列表
-                html.append("<h2>检测结果</h2>")
+                html.append("<h2>螺栓检测摘要</h2>")
                 aggregated_rows = getattr(self.thread, "frame_records", []) if self.thread else []
                 if not aggregated_rows:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
+                    loose_best = {}
+                    for row in aggregated_rows:
+                        if not is_loose_status(row.get("status", "")):
+                            continue
+                        bolt_id = row.get("bolt_id", "")
+                        conf = float(row.get("conf", 0.0) or 0.0)
+                        old = loose_best.get(bolt_id)
+                        if old is None or conf > old["conf"]:
+                            loose_best[bolt_id] = {
+                                "conf": conf,
+                                "det_path": row.get("det_path", ""),
+                            }
                     html.append("<ul>")
                     for row in sorted(
                         aggregated_rows,
                         key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
                     ):
+                        bolt_id = row.get("bolt_id", "")
+                        loose_path = "-"
+                        if bolt_id in loose_best:
+                            loose_path = loose_best[bolt_id]["det_path"] or "-"
+                        file_name = os.path.basename(path)
                         html.append(
-                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
+                            f"<li>螺栓编号：{bolt_id}；螺栓状态：{row.get('status', '')}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：{file_name}</li>"
                         )
                     html.append("</ul>")
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
-                    for row in aggregated_rows:
-                        html.append(
-                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
-                        )
-                    html.append("</table>")
                 # 视频文件链接
                 file_name = os.path.basename(path)
                 html.append(f"<p>输出视频文件：<a href='{file_name}'>{file_name}</a></p>")
@@ -2207,13 +2267,11 @@ class VideoInferencePage(FunctionPage):
         # 导出统一报表（每个螺栓仅保留最佳结果）
             if hasattr(self.thread, "frame_records"):
                 xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
-                csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
                 try:
                     aggregated = aggregate_bolt_records(self.thread.frame_records)
                     video_rows = aggregated_records_to_rows(aggregated, mode="video")
                     video_df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                     video_df.to_excel(xlsx_path, index=False)
-                    video_df.to_csv(csv_path, index=False)
                 except Exception:
                     pass
 
@@ -2239,14 +2297,20 @@ class VideoInferencePage(FunctionPage):
                 QMessageBox.warning(self, "拷贝视频失败", f"视频文件复制失败: {e}")
 
         # 复制HTML检测报告
+            archived_report_path = os.path.join(scan_layout["text_part"], os.path.basename(report_path))
             if os.path.exists(report_path):
                 try:
                     shutil.copy(
                         report_path,
-                        os.path.join(scan_layout["text_part"], os.path.basename(report_path))
+                        archived_report_path
                     )
                 except Exception as e:
                     QMessageBox.warning(self, "拷贝报告失败", f"报告复制失败: {e}")
+            cleanup_text_part_files(
+                scan_layout["text_part"],
+                keep_excel=os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
+                keep_html=archived_report_path if os.path.exists(archived_report_path) else None,
+            )
 
             QMessageBox.information(
                 self,
@@ -2554,10 +2618,6 @@ class CameraPage(FunctionPage):
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
                 )
-                image_df.to_csv(
-                    os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"),
-                    index=False,
-                )
             except Exception:
                 pass
 
@@ -2629,7 +2689,6 @@ class CameraPage(FunctionPage):
                 video_rows = aggregated_records_to_rows(aggregated, mode="video")
                 df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                 df.to_excel(os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"), index=False)
-                df.to_csv(os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"), index=False)
             except Exception:
                 pass
 
@@ -2677,26 +2736,37 @@ class CameraPage(FunctionPage):
                     except Exception:
                         pass
 
-                html.append("<h2>检测结果</h2>")
+                html.append("<h2>螺栓检测摘要</h2>")
                 frame_records = getattr(thread, "frame_records", []) or []
                 if not frame_records:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
+                    loose_best = {}
+                    for row in frame_records:
+                        if not is_loose_status(row.get("status", "")):
+                            continue
+                        bolt_id = row.get("bolt_id", "")
+                        conf = float(row.get("conf", 0.0) or 0.0)
+                        old = loose_best.get(bolt_id)
+                        if old is None or conf > old["conf"]:
+                            loose_best[bolt_id] = {
+                                "conf": conf,
+                                "det_path": row.get("det_path", ""),
+                            }
                     html.append("<ul>")
                     for row in sorted(
                         frame_records,
                         key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
                     ):
+                        bolt_id = row.get("bolt_id", "")
+                        loose_path = "-"
+                        if bolt_id in loose_best:
+                            loose_path = loose_best[bolt_id]["det_path"] or "-"
+                        video_link = os.path.basename(dest_video_path) if dest_video_path else "-"
                         html.append(
-                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
+                            f"<li>螺栓编号：{bolt_id}；螺栓状态：{row.get('status', '')}；松动螺栓最高置信度图片路径：{loose_path}；检测视频链接：{video_link}</li>"
                         )
                     html.append("</ul>")
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
-                    for row in frame_records:
-                        html.append(
-                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
-                        )
-                    html.append("</table>")
 
                 if dest_video_path:
                     rel_name = os.path.basename(dest_video_path)
@@ -2704,6 +2774,11 @@ class CameraPage(FunctionPage):
                 html.append("</body></html>")
                 with open(report_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(html))
+                cleanup_text_part_files(
+                    scan_layout["text_part"],
+                    keep_excel=os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
+                    keep_html=report_path,
+                )
             except Exception:
                 pass
 
