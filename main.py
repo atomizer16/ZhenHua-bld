@@ -13,6 +13,7 @@ import math
 import subprocess
 import platform
 import uuid
+import glob
 from pathlib import Path
 import cv2
 from PIL import Image
@@ -93,7 +94,18 @@ def reset_tracker_state(model):
 
 
 def is_loose_status(status):
-    return str(status or "").strip().lower() == "loose"
+    status_text = str(status or "").strip().lower()
+    if not status_text:
+        return False
+    return ("松" in status_text) or ("loose" in status_text)
+
+
+def normalize_bolt_id(value):
+    if isinstance(value, (int, float)):
+        return str(int(value))
+    text = str(value or "").strip()
+    m = re.search(r"\d+", text)
+    return m.group(0) if m else text
 
 
 def bolt_id_sort_key(value):
@@ -138,7 +150,7 @@ def aggregate_bolt_records(records):
     return aggregated
 
 
-UNIFIED_REPORT_COLUMNS = ["图片ID", "螺栓ID", "螺栓状态", "置信度", "x1", "y1", "x2", "y2"]
+UNIFIED_REPORT_COLUMNS = ["图片ID", "螺栓ID", "螺栓状态", "置信度", "检测框的x1", "检测框的y1", "检测框的x2", "检测框的y2"]
 
 
 def to_unified_report_rows(records):
@@ -147,13 +159,13 @@ def to_unified_report_rows(records):
         unified_rows.append(
             {
                 "图片ID": record.get("图片ID", ""),
-                "螺栓ID": record.get("螺栓ID", record.get("bolt_id", "")),
+                "螺栓ID": normalize_bolt_id(record.get("螺栓ID", record.get("bolt_id", ""))),
                 "螺栓状态": record.get("螺栓状态", record.get("status", record.get("class", ""))),
                 "置信度": record.get("置信度", record.get("confidence", record.get("conf", 0.0))),
-                "x1": record.get("x1", ""),
-                "y1": record.get("y1", ""),
-                "x2": record.get("x2", ""),
-                "y2": record.get("y2", ""),
+                "检测框的x1": record.get("x1", record.get("检测框的x1", "")),
+                "检测框的y1": record.get("y1", record.get("检测框的y1", "")),
+                "检测框的x2": record.get("x2", record.get("检测框的x2", "")),
+                "检测框的y2": record.get("y2", record.get("检测框的y2", "")),
             }
         )
     return unified_rows
@@ -413,6 +425,51 @@ def refresh_scan_id(scan_layout, scan_type, extra_metadata=None):
     metadata = build_scan_metadata(scan_type, extra_metadata=extra_metadata)
     write_id_file(scan_layout.get("text_part") or scan_layout.get("scan_dir") or "", metadata)
     return metadata
+
+
+def cleanup_text_part_files(text_part, keep_excel=None, keep_html=None):
+    keep_names = {"ID.TXT"}
+    if keep_excel:
+        keep_names.add(os.path.basename(keep_excel))
+    if keep_html:
+        keep_names.add(os.path.basename(keep_html))
+    for fp in glob.glob(os.path.join(text_part, "*")):
+        if not os.path.isfile(fp):
+            continue
+        name = os.path.basename(fp)
+        lower_name = name.lower()
+        if lower_name.endswith(".csv"):
+            try:
+                os.remove(fp)
+            except Exception:
+                pass
+            continue
+        if lower_name.endswith(".xlsx") or lower_name.endswith(".xls") or lower_name.endswith(".html"):
+            if name not in keep_names:
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
+
+
+def summarize_rows_by_bolt(rows):
+    summary = {}
+    for row in rows or []:
+        bolt_id = normalize_bolt_id(row.get("bolt_id", row.get("螺栓ID", "")))
+        conf = float(row.get("confidence", row.get("conf", row.get("置信度", 0.0))) or 0.0)
+        status = row.get("status", row.get("class", row.get("螺栓状态", "")))
+        image_id = row.get("图片ID", "")
+        det_path = row.get("det_path", "")
+        current = summary.get(bolt_id)
+        if current is None or conf > current["conf"]:
+            summary[bolt_id] = {
+                "bolt_id": bolt_id,
+                "status": status,
+                "conf": conf,
+                "image_id": image_id,
+                "det_path": det_path,
+            }
+    return [summary[k] for k in sorted(summary, key=bolt_id_sort_key)]
 
 
 # —— 资源路径统一管理 ——
@@ -1045,6 +1102,7 @@ class VideoProcessingThread(QThread):
         self.first_frame_ann  = None
 
         self.frame_records = []   # 聚合后每个螺栓的最佳检测结果
+        self.all_frame_records = []  # 每一帧每个螺栓的完整检测记录
         self.export_frames = []  # [{frame_id, raw_frame, ann_frame, frame_idx, bolt_id}]
         self.best_records = {}
 
@@ -1131,6 +1189,7 @@ class VideoProcessingThread(QThread):
                 }
                 previous = self.best_records.get(stable_id)
                 best = pick_better_bolt_record(previous, candidate)
+                self.all_frame_records.append(dict(candidate))
                 if best is candidate:
                     if ann_bgr_for_export is None:
                         ann_bgr_for_export = result.plot(img=frame_bgr.copy())
@@ -1163,7 +1222,10 @@ class VideoProcessingThread(QThread):
             self.progress_update.emit(prog)
 
         out_vid.release()
-        self.frame_records = aggregated_records_to_rows(self.best_records, mode="video")
+        self.frame_records = sorted(
+            self.all_frame_records,
+            key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+        )
         self.export_frames = [
             {
                 "图片ID": record.get("图片ID"),
@@ -1858,6 +1920,7 @@ class ImageInferencePage(FunctionPage):
         )
 
         best_records = {}
+        all_rows = []
         sample_orig = None
         sample_ann = None
         detail_lines = []
@@ -1917,7 +1980,7 @@ class ImageInferencePage(FunctionPage):
                 x1, y1, x2, y2 = [round(x, 2) for x in det["coords"]]
                 candidate = {
                     "图片ID": image_id,
-                    "bolt_id": det["stable_id"],
+                    "bolt_id": normalize_bolt_id(det["stable_id"]),
                     "class": det["class"],
                     "status": det["class"],
                     "confidence": det["conf"],
@@ -1935,6 +1998,7 @@ class ImageInferencePage(FunctionPage):
                 best_records[det["stable_id"]] = pick_better_bolt_record(
                     best_records.get(det["stable_id"]), candidate
                 )
+                all_rows.append(dict(candidate))
 
             if progress_callback:
                 progress_callback(idx, total)
@@ -1948,7 +2012,13 @@ class ImageInferencePage(FunctionPage):
         # 主动释放本次推理专用的模型实例，彻底断开与上一批次的状态关联
         del model_for_batch
 
-        rows = aggregated_records_to_rows(best_records, mode="image")
+        rows = sorted(
+            all_rows,
+            key=lambda r: (
+                bolt_id_sort_key(r.get("bolt_id", "")),
+                str(r.get("图片ID", "")),
+            ),
+        )
         detail_lines = []
         for record in best_records.values():
             try:
@@ -1984,16 +2054,14 @@ class ImageInferencePage(FunctionPage):
         rows = sorted(
             rows,
             key=lambda r: (
+                bolt_id_sort_key(r.get("bolt_id", r.get("螺栓ID", ""))),
                 str(r.get("图片ID", "")),
-                str(r.get("bolt_id", "")),
             ),
         )
         report_df = to_unified_report_df(rows)
         xlsx_path = os.path.join(text_part, "bolt_detection_result.xlsx")
-        csv_path = os.path.join(text_part, "bolt_detection_result.csv")
         try:
             report_df.to_excel(xlsx_path, index=False)
-            report_df.to_csv(csv_path, index=False)
         except Exception as e:
             QMessageBox.warning(self, "报表保存失败", f"检测详情保存失败: {e}")
         try:
@@ -2006,6 +2074,8 @@ class ImageInferencePage(FunctionPage):
             sample_ann.save(ann_buf, format=fmt)
             ann_b64 = base64.b64encode(ann_buf.getvalue()).decode("utf-8")
             ann_data_uri = f"data:image/{fmt.lower()};base64,{ann_b64}"
+
+            summary_rows = summarize_rows_by_bolt(rows)
             html = []
             html.append("<html><head><meta charset='utf-8'><title>检测报告</title></head><body>")
             html.append("<h1>图片批次检测报告</h1>")
@@ -2015,19 +2085,22 @@ class ImageInferencePage(FunctionPage):
             html.append(
                 f"<p><b>示例标注图像：</b><br><img src='{ann_data_uri}' width='600'></p>"
             )
-            html.append("<h2>检测结果明细</h2>")
-            html.append(
-                "<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>"
-            )
-
-            for r in rows:
+            html.append("<h2>螺栓检测摘要</h2>")
+            html.append("<table border='1' cellspacing='0' cellpadding='4'>")
+            html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
+            for r in summary_rows:
+                image_name = "-"
+                if is_loose_status(r.get("status")):
+                    image_name = os.path.basename(r.get("det_path", "")) or str(r.get("image_id", "")) or "-"
                 html.append(
-                    f"<tr><td>{r['图片ID']}</td><td>{r['bolt_id']}</td><td>{r['class']}</td><td>{r['confidence']:.3f}</td></tr>"
+                    f"<tr><td>{r.get('bolt_id', '')}</td><td>{r.get('status', '')}</td><td>{float(r.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>无</td></tr>"
                 )
-            html.append("</table></body></html>")
+            html.append("</table>")
+            html.append("</body></html>")
             report_path = os.path.join(text_part, "bolt_detection_report.html")
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(html))
+            cleanup_text_part_files(text_part, keep_excel=xlsx_path, keep_html=report_path)
         except Exception as e:
             QMessageBox.warning(self, "警告", f"报告生成失败: {e}")
     def on_back(self):
@@ -2169,24 +2242,20 @@ class VideoInferencePage(FunctionPage):
                         html.append(f"<p><b>原始视频首帧：</b><br><img src='{orig_data_uri}' width='600'></p>")
                         html.append(f"<p><b>标注结果示例帧：</b><br><img src='{ann_data_uri}' width='600'></p>")
                 # 检测结果列表
-                html.append("<h2>检测结果</h2>")
+                html.append("<h2>螺栓检测摘要</h2>")
                 aggregated_rows = getattr(self.thread, "frame_records", []) if self.thread else []
                 if not aggregated_rows:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    html.append("<ul>")
-                    for row in sorted(
-                        aggregated_rows,
-                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
-                    ):
+                    file_name = os.path.basename(path)
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'>")
+                    html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
+                    for row in summarize_rows_by_bolt(aggregated_rows):
+                        image_name = "-"
+                        if is_loose_status(row.get("status")):
+                            image_name = os.path.basename(row.get("det_path", "")) or str(row.get("image_id", "")) or "-"
                         html.append(
-                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
-                        )
-                    html.append("</ul>")
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
-                    for row in aggregated_rows:
-                        html.append(
-                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                            f"<tr><td>{row.get('bolt_id', '')}</td><td>{row.get('status', '')}</td><td>{float(row.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>{file_name}</td></tr>"
                         )
                     html.append("</table>")
                 # 视频文件链接
@@ -2207,13 +2276,13 @@ class VideoInferencePage(FunctionPage):
         # 导出统一报表（每个螺栓仅保留最佳结果）
             if hasattr(self.thread, "frame_records"):
                 xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
-                csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
                 try:
-                    aggregated = aggregate_bolt_records(self.thread.frame_records)
-                    video_rows = aggregated_records_to_rows(aggregated, mode="video")
-                    video_df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
+                    video_rows = sorted(
+                        getattr(self.thread, "frame_records", []) or [],
+                        key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+                    )
+                    video_df = to_unified_report_df(video_rows)
                     video_df.to_excel(xlsx_path, index=False)
-                    video_df.to_csv(csv_path, index=False)
                 except Exception:
                     pass
 
@@ -2239,14 +2308,20 @@ class VideoInferencePage(FunctionPage):
                 QMessageBox.warning(self, "拷贝视频失败", f"视频文件复制失败: {e}")
 
         # 复制HTML检测报告
+            archived_report_path = os.path.join(scan_layout["text_part"], os.path.basename(report_path))
             if os.path.exists(report_path):
                 try:
                     shutil.copy(
                         report_path,
-                        os.path.join(scan_layout["text_part"], os.path.basename(report_path))
+                        archived_report_path
                     )
                 except Exception as e:
                     QMessageBox.warning(self, "拷贝报告失败", f"报告复制失败: {e}")
+            cleanup_text_part_files(
+                scan_layout["text_part"],
+                keep_excel=os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
+                keep_html=archived_report_path if os.path.exists(archived_report_path) else None,
+            )
 
             QMessageBox.information(
                 self,
@@ -2549,13 +2624,9 @@ class CameraPage(FunctionPage):
             image_page.archive_results(rows, sample_orig, sample_ann, annotated_infos, scan_layout)
 
             try:
-                image_df = to_unified_report_df(rows).sort_values(by=["图片ID", "螺栓ID"], kind="stable")
+                image_df = to_unified_report_df(rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
                 image_df.to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
-                    index=False,
-                )
-                image_df.to_csv(
-                    os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"),
                     index=False,
                 )
             except Exception:
@@ -2625,11 +2696,12 @@ class CameraPage(FunctionPage):
 
             frame_records = getattr(thread, "frame_records", None)
             try:
-                aggregated = aggregate_bolt_records(frame_records or [])
-                video_rows = aggregated_records_to_rows(aggregated, mode="video")
-                df = to_unified_report_df(video_rows).sort_values(by=["螺栓ID", "图片ID"], kind="stable")
+                video_rows = sorted(
+                    frame_records or [],
+                    key=lambda r: (bolt_id_sort_key(r.get("bolt_id", "")), str(r.get("图片ID", ""))),
+                )
+                df = to_unified_report_df(video_rows)
                 df.to_excel(os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"), index=False)
-                df.to_csv(os.path.join(scan_layout["text_part"], "bolt_detection_result.csv"), index=False)
             except Exception:
                 pass
 
@@ -2677,24 +2749,20 @@ class CameraPage(FunctionPage):
                     except Exception:
                         pass
 
-                html.append("<h2>检测结果</h2>")
+                html.append("<h2>螺栓检测摘要</h2>")
                 frame_records = getattr(thread, "frame_records", []) or []
                 if not frame_records:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
-                    html.append("<ul>")
-                    for row in sorted(
-                        frame_records,
-                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
-                    ):
+                    video_link = os.path.basename(dest_video_path) if dest_video_path else "-"
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'>")
+                    html.append("<tr><th>螺栓编号</th><th>螺栓状态</th><th>最高置信度</th><th>最高置信度对应图片名</th><th>检测视频链接</th></tr>")
+                    for row in summarize_rows_by_bolt(frame_records):
+                        image_name = "-"
+                        if is_loose_status(row.get("status")):
+                            image_name = os.path.basename(row.get("det_path", "")) or str(row.get("image_id", "")) or "-"
                         html.append(
-                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
-                        )
-                    html.append("</ul>")
-                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
-                    for row in frame_records:
-                        html.append(
-                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                            f"<tr><td>{row.get('bolt_id', '')}</td><td>{row.get('status', '')}</td><td>{float(row.get('conf', 0.0)):.3f}</td><td>{image_name}</td><td>{video_link}</td></tr>"
                         )
                     html.append("</table>")
 
@@ -2704,6 +2772,11 @@ class CameraPage(FunctionPage):
                 html.append("</body></html>")
                 with open(report_path, "w", encoding="utf-8") as f:
                     f.write("\n".join(html))
+                cleanup_text_part_files(
+                    scan_layout["text_part"],
+                    keep_excel=os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
+                    keep_html=report_path,
+                )
             except Exception:
                 pass
 
