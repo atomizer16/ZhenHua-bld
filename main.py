@@ -96,6 +96,16 @@ def is_loose_status(status):
     return str(status or "").strip().lower() == "loose"
 
 
+def bolt_id_sort_key(value):
+    if isinstance(value, (int, float)):
+        return (0, float(value), str(value))
+    text = str(value)
+    m = re.search(r"\d+", text)
+    if m:
+        return (0, float(m.group()), text)
+    return (1, float("inf"), text)
+
+
 def _candidate_sort_key(record):
     return (
         1 if is_loose_status(record.get("status") or record.get("class")) else 0,
@@ -130,6 +140,7 @@ def aggregate_bolt_records(records):
 
 def aggregated_records_to_rows(aggregated, mode="image"):
     rows = []
+    for bolt_id, record in sorted(aggregated.items(), key=lambda item: bolt_id_sort_key(item[0])):
     for bolt_id, record in sorted(aggregated.items(), key=lambda item: str(item[0])):
         if mode == "video":
             rows.append({
@@ -1946,6 +1957,13 @@ class ImageInferencePage(FunctionPage):
 
     def archive_results(self, rows, sample_orig, sample_ann, ann_infos, scan_layout):
         text_part = scan_layout["text_part"]
+        rows = sorted(
+            rows,
+            key=lambda r: (
+                str(r.get("图片ID", "")),
+                str(r.get("bolt_id", "")),
+            ),
+        )
         try:
             cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
             pd.DataFrame(rows, columns=cols).to_csv(
@@ -2131,6 +2149,15 @@ class VideoInferencePage(FunctionPage):
                 if not aggregated_rows:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
+                    html.append("<ul>")
+                    for row in sorted(
+                        aggregated_rows,
+                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
+                    ):
+                        html.append(
+                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
+                        )
+                    html.append("</ul>")
                     html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
                     for row in aggregated_rows:
                         html.append(
@@ -2155,6 +2182,10 @@ class VideoInferencePage(FunctionPage):
         # 导出CSV（所有检测数据）
             if hasattr(self.thread, "frame_records"):
                 csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
+                video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
+                video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
+                video_df = video_df.sort_values(by=["bolt_id", "frame"], kind="stable")
+                video_df.to_csv(csv_path, index=False)
                 xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
                 video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
                 video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
@@ -2497,6 +2528,10 @@ class CameraPage(FunctionPage):
 
             try:
                 cols = ["图片ID", "bolt_id", "class", "confidence", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
+                image_df = pd.DataFrame(rows, columns=cols).sort_values(
+                    by=["图片ID", "bolt_id"], kind="stable"
+                )
+                image_df.to_excel(
                 pd.DataFrame(rows, columns=cols).to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
@@ -2574,6 +2609,7 @@ class CameraPage(FunctionPage):
                 df = pd.DataFrame(columns=columns)
 
             df = df.reindex(columns=columns)
+            df = df.sort_values(by=["bolt_id", "frame"], kind="stable")
 
             csv_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.csv")
             df.to_csv(csv_path, index=False)
@@ -2631,6 +2667,15 @@ class CameraPage(FunctionPage):
                 if not frame_records:
                     html.append("<p>未检测到任何目标。</p>")
                 else:
+                    html.append("<ul>")
+                    for row in sorted(
+                        frame_records,
+                        key=lambda x: (bolt_id_sort_key(x.get("bolt_id", "")), str(x.get("图片ID", ""))),
+                    ):
+                        html.append(
+                            f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
+                        )
+                    html.append("</ul>")
                     html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
                     for row in frame_records:
                         html.append(
