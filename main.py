@@ -141,6 +141,7 @@ def aggregate_bolt_records(records):
 def aggregated_records_to_rows(aggregated, mode="image"):
     rows = []
     for bolt_id, record in sorted(aggregated.items(), key=lambda item: bolt_id_sort_key(item[0])):
+    for bolt_id, record in sorted(aggregated.items(), key=lambda item: str(item[0])):
         if mode == "video":
             rows.append({
                 "图片ID": record.get("图片ID", ""),
@@ -2157,6 +2158,12 @@ class VideoInferencePage(FunctionPage):
                             f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
                         )
                     html.append("</ul>")
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
+                    for row in aggregated_rows:
+                        html.append(
+                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                        )
+                    html.append("</table>")
                 # 视频文件链接
                 file_name = os.path.basename(path)
                 html.append(f"<p>输出视频文件：<a href='{file_name}'>{file_name}</a></p>")
@@ -2179,6 +2186,14 @@ class VideoInferencePage(FunctionPage):
                 video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
                 video_df = video_df.sort_values(by=["bolt_id", "frame"], kind="stable")
                 video_df.to_csv(csv_path, index=False)
+                xlsx_path = os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx")
+                video_cols = ["图片ID", "frame", "bolt_id", "status", "conf", "x1", "y1", "x2", "y2", "raw_path", "det_path"]
+                video_df = pd.DataFrame(self.thread.frame_records).reindex(columns=video_cols)
+                video_df.to_csv(csv_path, index=False)
+                try:
+                    video_df.to_excel(xlsx_path, index=False)
+                except Exception:
+                    pass
 
         # 导出松动关键帧图片
             for frame_info in getattr(self.thread, "export_frames", []):
@@ -2517,6 +2532,7 @@ class CameraPage(FunctionPage):
                     by=["图片ID", "bolt_id"], kind="stable"
                 )
                 image_df.to_excel(
+                pd.DataFrame(rows, columns=cols).to_excel(
                     os.path.join(scan_layout["text_part"], "bolt_detection_result.xlsx"),
                     index=False,
                 )
@@ -2660,6 +2676,12 @@ class CameraPage(FunctionPage):
                             f"<li>螺栓编号 {row['bolt_id']}: 状态 = {row['status']}（置信度 {float(row['conf']):.3f}，图片ID {row['图片ID']}，帧 {row['frame']}）</li>"
                         )
                     html.append("</ul>")
+                    html.append("<table border='1' cellspacing='0' cellpadding='4'><tr><th>图片ID</th><th>帧号</th><th>螺栓ID</th><th>状态</th><th>置信度</th></tr>")
+                    for row in frame_records:
+                        html.append(
+                            f"<tr><td>{row['图片ID']}</td><td>{row['frame']}</td><td>{row['bolt_id']}</td><td>{row['status']}</td><td>{float(row['conf']):.3f}</td></tr>"
+                        )
+                    html.append("</table>")
 
                 if dest_video_path:
                     rel_name = os.path.basename(dest_video_path)
