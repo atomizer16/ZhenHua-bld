@@ -1094,12 +1094,13 @@ class VideoProcessingThread(QThread):
     finished_signal = pyqtSignal(str)
     frame_signal    = pyqtSignal(QImage)
 
-    def __init__(self, video_path, model, conf_thres, device_option, parent=None):
+    def __init__(self, video_path, model, conf_thres, device_option, raw_export_dir=None, parent=None):
         super().__init__(parent)
         self.video_path    = video_path
         self.model         = model
         self.conf_thres    = conf_thres
         self.device_option = device_option
+        self.raw_export_dir = raw_export_dir
         self._running      = True
 
         self.id_map  = {}
@@ -1149,6 +1150,16 @@ class VideoProcessingThread(QThread):
             frame_bgr = result.orig_img
             if frame_bgr is None:
                 continue
+
+            if self.raw_export_dir:
+                try:
+                    frame_name = build_frame_name(idx_frame)
+                    cv2.imwrite(
+                        os.path.join(self.raw_export_dir, frame_name["raw_filename"]),
+                        frame_bgr,
+                    )
+                except Exception:
+                    pass
 
             # --- ID二次映射逻辑（和原代码一致）---
             for box in result.boxes:
@@ -1941,6 +1952,14 @@ class ImageInferencePage(FunctionPage):
             image_id = image_name["id"]
             raw_path = os.path.join(raw_part, image_name["raw_filename"])
             ann_path = os.path.join(image_part, image_name["det_filename"])
+            try:
+                if os.path.abspath(fp) != os.path.abspath(raw_path):
+                    shutil.copy2(fp, raw_path)
+            except Exception:
+                try:
+                    cv2.imwrite(raw_path, orig_bgr)
+                except Exception:
+                    pass
 
             if idx == 1:
                 sample_orig = Image.fromarray(cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB))
@@ -2195,7 +2214,7 @@ class VideoInferencePage(FunctionPage):
         refresh_scan_id(self.current_scan_layout, "v")
         # 启动视频处理线程
         self.thread = VideoProcessingThread(
-            fp, self.model, self.conf_thres, self.device_option
+            fp, self.model, self.conf_thres, self.device_option, raw_export_dir=self.current_scan_layout["raw_part"]
         )
         self.thread.progress_update.connect(self.bar.setValue)
         self.thread.finished_signal.connect(self.on_finish)
@@ -2664,7 +2683,7 @@ class CameraPage(FunctionPage):
                 QApplication.processEvents()
 
             thread = VideoProcessingThread(
-                video_path, self.model, self.conf_thres, self.device_option
+                video_path, self.model, self.conf_thres, self.device_option, raw_export_dir=scan_layout["raw_part"]
             )
             thread.progress_update.connect(update_video_progress)
 
