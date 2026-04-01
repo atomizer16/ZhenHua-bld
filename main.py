@@ -22,6 +22,7 @@ import pandas as pd
 import paho.mqtt.client as mqtt
 from webdav3.client import Client
 import requests
+import py7zr
 import json
 from urllib.parse import urljoin, urlparse, urlunparse, unquote
 from xml.etree import ElementTree
@@ -62,6 +63,54 @@ def save_users(users):
     import json
     with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(users, f, ensure_ascii=False, indent=4)
+
+def package_scan_batch(scan_dir, status_callback=None):
+    """将批次目录打包为 7z(LZMA2) 压缩包，返回压缩包路径。"""
+    if not scan_dir or not os.path.isdir(scan_dir):
+        raise FileNotFoundError(f"批次目录不存在: {scan_dir}")
+    batch_name = os.path.basename(os.path.normpath(scan_dir))
+    archive_path = os.path.join(os.path.dirname(scan_dir), f"{batch_name}.7z")
+    if callable(status_callback):
+        status_callback("压缩中")
+    filters = [{"id": py7zr.FILTER_LZMA2, "preset": 7}]
+    with py7zr.SevenZipFile(archive_path, mode="w", filters=filters) as zf:
+        zf.writeall(scan_dir, arcname=batch_name)
+    if callable(status_callback):
+        status_callback("压缩完成")
+    return archive_path
+
+
+def run_upload_with_status(parent, title, upload_callable):
+    """统一上传状态提示：压缩中/压缩完成/上传中/上传完成或失败。"""
+    progress = QProgressDialog(f"{title}：准备中", "", 0, 4, parent)
+    progress.setWindowTitle("上传状态")
+    progress.setCancelButton(None)
+    progress.setWindowModality(Qt.WindowModal)
+    progress.setMinimumDuration(0)
+    progress.setAutoClose(False)
+    progress.setAutoReset(False)
+    progress.setValue(0)
+    status_order = {"压缩中": 1, "压缩完成": 2, "上传中": 3, "上传完成": 4, "上传失败": 4}
+    seen = []
+
+    def status_callback(status_text):
+        if status_text not in seen:
+            seen.append(status_text)
+        progress.setLabelText(f"{title}：{status_text}")
+        progress.setValue(status_order.get(status_text, progress.value()))
+        QApplication.processEvents()
+
+    progress.show()
+    try:
+        upload_callable(status_callback)
+        if "上传完成" not in seen:
+            status_callback("上传完成")
+        return True, seen
+    except Exception:
+        status_callback("上传失败")
+        raise
+    finally:
+        progress.close()
 
 
 # —— 跟踪器状态管理 ——
@@ -1783,7 +1832,11 @@ class ImageInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path,
                     )
-                    dav.upload_batch(scan_dir, resume=True)
+                    run_upload_with_status(
+                        self,
+                        "WebDAV 上传",
+                        lambda cb: dav.upload_batch(scan_dir, resume=True, status_callback=cb),
+                    )
                     QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
                 except Exception as e:
                     QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
@@ -1857,7 +1910,11 @@ class ImageInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path,
                     )
-                    dav.upload_batch(scan_dir, resume=True)
+                    run_upload_with_status(
+                        self,
+                        "WebDAV 上传",
+                        lambda cb: dav.upload_batch(scan_dir, resume=True, status_callback=cb),
+                    )
                     QMessageBox.information(self, "上传完成", "WebDAV 上传成功")
                 except Exception as e:
                     QMessageBox.warning(self, "上传失败", f"WebDAV 上传失败：{e}")
@@ -2368,7 +2425,11 @@ class VideoInferencePage(FunctionPage):
                         topic=mw.mqtt_topic
                     )
                     uploader.connect()
-                    uploader.upload_batch(scan_dir)
+                    run_upload_with_status(
+                        self,
+                        "MQTT 上传",
+                        lambda cb: uploader.upload_batch(scan_dir, status_callback=cb),
+                    )
                     upload_msgs.append("MQTT 上传成功")
                 except Exception as e:
                     upload_msgs.append(f"MQTT 上传失败：{e}")
@@ -2391,7 +2452,11 @@ class VideoInferencePage(FunctionPage):
                         password=mw.webdav_pass,
                         remote_path=mw.webdav_remote_path
                     )
-                    dav.upload_batch(scan_dir, resume=True)
+                    run_upload_with_status(
+                        self,
+                        "WebDAV 上传",
+                        lambda cb: dav.upload_batch(scan_dir, resume=True, status_callback=cb),
+                    )
                     upload_msgs.append("WebDAV 上传成功")
                 except Exception as e:
                     upload_msgs.append(f"WebDAV 上传失败：{e}")
@@ -3186,11 +3251,13 @@ class MqttUploader:
         self.client.publish(self.topic, payload, qos=1)
         print(f"已上传文件：{filename} 到Topic: {self.topic}")
 
-    def upload_batch(self, batch_dir):
-        for name in os.listdir(batch_dir):
-            fp = os.path.join(batch_dir, name)
-            if os.path.isfile(fp):
-                self.upload_file(fp)
+    def upload_batch(self, batch_dir, archive_path=None, status_callback=None):
+        archive_fp = archive_path or package_scan_batch(batch_dir, status_callback=status_callback)
+        if callable(status_callback):
+            status_callback("上传中")
+        self.upload_file(archive_fp)
+        if callable(status_callback):
+            status_callback("上传完成")
 
 class UploadSettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
@@ -3306,7 +3373,11 @@ class UploadSettingsPage(FunctionPage):
             )
             try:
                 uploader.connect()
-                uploader.upload_batch(latest)
+                run_upload_with_status(
+                    self,
+                    "MQTT 上传",
+                    lambda cb: uploader.upload_batch(latest, status_callback=cb),
+                )
                 uploader.disconnect()
                 QMessageBox.information(self, "上传完成", f"已上传：{latest}")
             except Exception as e:
@@ -3520,12 +3591,13 @@ class WebDAVUploader:
 
         print(f"WebDAV已分块上传: {filename} ({local_size}) 到 {remote_fp}")
 
-    def upload_batch(self, batch_dir, resume=True):
-        # 批次目录下所有文件全部上传
-        for name in os.listdir(batch_dir):
-            fp = os.path.join(batch_dir, name)
-            if os.path.isfile(fp):
-                self.upload_file(fp, resume=resume)
+    def upload_batch(self, batch_dir, resume=True, archive_path=None, status_callback=None):
+        archive_fp = archive_path or package_scan_batch(batch_dir, status_callback=status_callback)
+        if callable(status_callback):
+            status_callback("上传中")
+        self.upload_file(archive_fp, resume=resume)
+        if callable(status_callback):
+            status_callback("上传完成")
 
 class WebDAVUploadSettingsPage(FunctionPage):
     def __init__(self, mw, parent=None):
@@ -3631,7 +3703,11 @@ class WebDAVUploadSettingsPage(FunctionPage):
                 remote_path=self.main_window.webdav_remote_path
             )
             try:
-                uploader.upload_batch(latest, resume=True)
+                run_upload_with_status(
+                    self,
+                    "WebDAV 上传",
+                    lambda cb: uploader.upload_batch(latest, resume=True, status_callback=cb),
+                )
                 QMessageBox.information(self, "上传完成", f"已上传：{latest}")
             except Exception as e:
                 QMessageBox.warning(self, "上传失败", f"上传失败：{e}")
