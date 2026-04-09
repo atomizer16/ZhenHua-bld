@@ -4075,4 +4075,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # 新架构优先：UI 通过 HTTP 调 FastAPI，不再直接耦合推理实现。
+    try:
+        from ui import main as ui_main
+        ui_main()
+    except Exception:
+        # 兼容：若新 UI 不可用，回退原有入口。
+        main()
